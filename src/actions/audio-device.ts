@@ -21,9 +21,11 @@ import {
     type WillDisappearEvent,
 } from "@elgato/streamdeck";
 
-import { AudioDetector, DetectionError } from "../audio/detector.js";
+import { AudioDetector, DetectionError, type DetectionResult } from "../audio/detector.js";
 import { shortenDeviceName, wrapForKey } from "../utils/name-shortener.js";
 import { getLogger } from "../utils/logger.js";
+
+const REFRESH_DEBOUNCE_MS = 250;
 
 /**
  * Settings persisted per action instance.
@@ -54,6 +56,9 @@ export class AudioDeviceAction extends SingletonAction<AudioDeviceSettings> {
 
     /** Visible key instances, keyed by Stream Deck context id. */
     private readonly visible = new Map<string, KeyAction<AudioDeviceSettings>>();
+
+    /** Debounce timer for scheduleRefreshAll(); coalesces burst events. */
+    private refreshAllTimer: NodeJS.Timeout | null = null;
 
     override async onWillAppear(
         ev: WillAppearEvent<AudioDeviceSettings>,
@@ -107,73 +112,121 @@ export class AudioDeviceAction extends SingletonAction<AudioDeviceSettings> {
     }
 
     /**
-     * Public hook so external triggers (e.g. a future audio-change watcher)
-     * can ask all visible keys to re-detect.
+     * Schedule a refresh of all visible keys, debounced. Multiple calls within
+     * REFRESH_DEBOUNCE_MS coalesce into a single detect — important because
+     * Windows often fires several IMMNotificationClient events back-to-back
+     * (state change + default change + property change) for one user action.
+     */
+    scheduleRefreshAll(): void {
+        if (this.refreshAllTimer) clearTimeout(this.refreshAllTimer);
+        this.refreshAllTimer = setTimeout(() => {
+            this.refreshAllTimer = null;
+            void this.refreshAll();
+        }, REFRESH_DEBOUNCE_MS);
+        this.refreshAllTimer.unref();
+    }
+
+    /**
+     * Re-detect once and apply the result to every visible key. External
+     * callers should usually go through scheduleRefreshAll() instead.
      */
     async refreshAll(): Promise<void> {
+        if (this.visible.size === 0) return;
+        const log = getLogger();
+
+        // Detect once; share the result across keys so we don't spawn one
+        // PowerShell process per visible key.
+        let result: DetectionResult | undefined;
+        try {
+            result = await this.detector.detect();
+        } catch (err) {
+            const causes =
+                err instanceof DetectionError ? err.causes.join(" | ") : String(err);
+            log.error("Action", "refreshAll: detection failed", causes);
+            // Fall through with result === undefined; refresh() will surface
+            // the error per-key.
+        }
+
         for (const action of this.visible.values()) {
             try {
                 const settings = await action.getSettings<AudioDeviceSettings>();
-                await this.refresh(action, settings);
+                await this.refresh(action, settings, result);
             } catch (err) {
-                getLogger().warn(
-                    "Action",
-                    `refreshAll: failed for ${action.id}`,
-                    err,
-                );
+                log.warn("Action", `refreshAll: failed for ${action.id}`, err);
             }
         }
     }
 
-    /** Detect, format, and push the title to the key. */
+    /**
+     * Detect (or use a pre-fetched result), format, and push the title to
+     * the key. Pass `preDetected` from refreshAll() to share one detect
+     * across all visible keys.
+     */
     private async refresh(
         key: KeyAction<AudioDeviceSettings>,
         settings: AudioDeviceSettings | undefined,
+        preDetected?: DetectionResult,
     ): Promise<void> {
         const log = getLogger();
 
-        // Show a quick "..." while we detect, so the press feels responsive.
-        try {
-            await key.setTitle("…");
-        } catch {
-            /* not fatal */
-        }
-
-        // Allow user override.
+        // Allow user override — fast path, no detect needed.
         if (settings?.customLabel && settings.customLabel.trim().length > 0) {
             const label = wrapForKey(settings.customLabel.trim());
             log.debug("Action", `using custom label: "${label}"`);
-            await key.setTitle(label);
+            try {
+                await key.setTitle(label);
+            } catch {
+                /* not fatal */
+            }
             return;
         }
 
+        // Only show the "…" placeholder when we're about to do real work
+        // (no preDetected). With preDetected we render immediately and the
+        // flicker would just be noise.
+        if (!preDetected) {
+            try {
+                await key.setTitle("…");
+            } catch {
+                /* not fatal */
+            }
+        }
+
+        let result = preDetected;
+        if (!result) {
+            try {
+                result = await this.detector.detect();
+            } catch (err) {
+                const causes =
+                    err instanceof DetectionError ? err.causes.join(" | ") : String(err);
+                log.error("Action", "detection failed", causes);
+                try {
+                    await key.setTitle("Unknown");
+                    await key.showAlert();
+                } catch {
+                    /* ignore */
+                }
+                return;
+            }
+        }
+
+        const shortened = shortenDeviceName(result.name, {
+            maxLength: settings?.maxLength,
+            aggressive: settings?.aggressiveShorten ?? true,
+            style: settings?.nameStyle ?? "role",
+        });
+        const wrapped = wrapForKey(shortened);
+
+        log.info(
+            "Action",
+            `device="${result.name}" → display="${shortened}" (via ${result.source})`,
+        );
+
         try {
-            const result = await this.detector.detect();
-            const shortened = shortenDeviceName(result.name, {
-                maxLength: settings?.maxLength,
-                aggressive: settings?.aggressiveShorten ?? true,
-                style: settings?.nameStyle ?? "role",
-            });
-            const wrapped = wrapForKey(shortened);
-
-            log.info(
-                "Action",
-                `device="${result.name}" → display="${shortened}" (via ${result.source})`,
-            );
-
             await key.setTitle(wrapped);
             await key.setState(0);
         } catch (err) {
-            const causes =
-                err instanceof DetectionError ? err.causes.join(" | ") : String(err);
-            log.error("Action", "detection failed", causes);
-
-            try {
-                await key.setTitle("Unknown");
-                await key.showAlert();
-            } catch {
-                /* ignore */
-            }
+            log.warn("Action", `setTitle failed for ${key.id}`, err);
         }
     }
 }

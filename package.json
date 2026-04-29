@@ -1,6 +1,6 @@
 {
     "name": "com.nathan.defaultaudio",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Stream Deck plugin that displays the current default Windows audio output device.",
     "main": "com.nathan.defaultaudio.sdPlugin/bin/plugin.js",
     "type": "module",

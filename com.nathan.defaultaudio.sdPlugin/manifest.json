@@ -2,7 +2,7 @@
     "Name": "Default Audio Device",
     "Description": "Displays the current default Windows audio output device on the key. Press to refresh.",
     "Author": "Nathan",
-    "Version": "1.0.0.0",
+    "Version": "1.1.0.0",
     "Icon": "imgs/plugin/category-icon",
     "URL": "https://github.com/",
     "SDKVersion": 2,
