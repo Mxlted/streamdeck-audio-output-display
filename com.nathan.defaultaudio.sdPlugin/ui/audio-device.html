@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Default Audio Device</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- The streamdeck-sdpi web component library is bundled with Stream Deck
+         6.5+ and renders Elgato-styled inputs that auto-bind to settings. -->
+    <script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+</head>
+<body>
+    <sdpi-item label="Custom label">
+        <sdpi-textfield
+            setting="customLabel"
+            placeholder="Leave blank to auto-detect"
+            maxlength="40">
+        </sdpi-textfield>
+    </sdpi-item>
+
+    <sdpi-item label="Show">
+        <sdpi-select setting="nameStyle" default="role">
+            <option value="role">Role (e.g. "Speakers")</option>
+            <option value="model">Model (e.g. "Realtek(R) Audio")</option>
+            <option value="full">Both</option>
+        </sdpi-select>
+    </sdpi-item>
+
+    <sdpi-item label="Max chars">
+        <sdpi-range
+            setting="maxLength"
+            default="22"
+            min="6"
+            max="40"
+            step="1"
+            showlabels>
+        </sdpi-range>
+    </sdpi-item>
+
+    <sdpi-item label="Aggressive shorten">
+        <sdpi-checkbox setting="aggressiveShorten" default="true" label="Strip driver noise"></sdpi-checkbox>
+    </sdpi-item>
+
+    <sdpi-item label="Tip">
+        <sdpi-item-value>
+            Press the key on the deck to refresh the displayed device.
+        </sdpi-item-value>
+    </sdpi-item>
+</body>
+</html>

@@ -1,0 +1,34 @@
+{
+    "name": "com.nathan.defaultaudio",
+    "version": "1.0.0",
+    "description": "Stream Deck plugin that displays the current default Windows audio output device.",
+    "main": "com.nathan.defaultaudio.sdPlugin/bin/plugin.js",
+    "type": "module",
+    "scripts": {
+        "build": "rollup -c",
+        "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.nathan.defaultaudio\"",
+        "package": "streamdeck pack com.nathan.defaultaudio.sdPlugin",
+        "validate": "streamdeck validate com.nathan.defaultaudio.sdPlugin",
+        "link": "streamdeck link com.nathan.defaultaudio.sdPlugin",
+        "restart": "streamdeck restart com.nathan.defaultaudio"
+    },
+    "author": "Nathan",
+    "license": "MIT",
+    "dependencies": {
+        "@elgato/streamdeck": "^1.4.0"
+    },
+    "devDependencies": {
+        "@rollup/plugin-commonjs": "^28.0.0",
+        "@rollup/plugin-json": "^6.1.0",
+        "@rollup/plugin-node-resolve": "^15.3.0",
+        "@rollup/plugin-typescript": "^12.1.1",
+        "@tsconfig/node20": "^20.1.4",
+        "@types/node": "^20.16.10",
+        "rollup": "^4.24.0",
+        "tslib": "^2.7.0",
+        "typescript": "^5.6.3"
+    },
+    "engines": {
+        "node": ">=20"
+    }
+}

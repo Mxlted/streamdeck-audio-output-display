@@ -1,0 +1,6 @@
+node_modules/
+com.nathan.defaultaudio.sdPlugin/bin/
+com.nathan.defaultaudio.sdPlugin/logs/
+*.streamDeckPlugin
+*.tsbuildinfo
+.DS_Store

@@ -1,0 +1,49 @@
+{
+    "Name": "Default Audio Device",
+    "Description": "Displays the current default Windows audio output device on the key. Press to refresh.",
+    "Author": "Nathan",
+    "Version": "1.0.0.0",
+    "Icon": "imgs/plugin/category-icon",
+    "URL": "https://github.com/",
+    "SDKVersion": 2,
+    "Software": {
+        "MinimumVersion": "6.5"
+    },
+    "OS": [
+        {
+            "Platform": "windows",
+            "MinimumVersion": "10"
+        }
+    ],
+    "Nodejs": {
+        "Version": "20",
+        "Debug": "enabled"
+    },
+    "CodePath": "bin/plugin.js",
+    "UUID": "com.nathan.defaultaudio",
+    "Category": "Default Audio Device",
+    "CategoryIcon": "imgs/plugin/category-icon",
+    "Actions": [
+        {
+            "Name": "Default Audio",
+            "UUID": "com.nathan.defaultaudio.show",
+            "Icon": "imgs/actions/audio-device/icon",
+            "Tooltip": "Shows the current default audio output device. Press to refresh.",
+            "PropertyInspectorPath": "ui/audio-device.html",
+            "Controllers": ["Keypad"],
+            "States": [
+                {
+                    "Image": "imgs/actions/audio-device/key",
+                    "TitleAlignment": "middle",
+                    "FontSize": 9,
+                    "FontStyle": "Bold",
+                    "FontFamily": "Arial",
+                    "TitleColor": "#FFFFFF",
+                    "ShowTitle": true
+                }
+            ],
+            "DisableAutomaticStates": true,
+            "SupportedInMultiActions": false
+        }
+    ]
+}
