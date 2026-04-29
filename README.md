@@ -1,17 +1,21 @@
 # Default Audio Device (Stream Deck Plugin)
 
-A Windows Stream Deck plugin that displays the current default Windows audio output device on a key. Press the key to refresh the displayed name.
+A Windows Stream Deck plugin that displays the current default Windows audio output device on a key. The key updates automatically when Windows changes the default device, and you can press it at any time to force a re-detect.
 
-## [Overview](#overview) · [Requirements](#requirements) · [Installation](#installation) · [Build from source](#build-from-source)
+## [Overview](#overview) · [Requirements](#requirements) · [Installation](#installation) · [Build from source](#build-from-source) · [Troubleshooting](#troubleshooting)
 
 ## Overview
 
-This plugin reads the current default audio render endpoint from Windows and renders its friendly name on a Stream Deck key. It is a display and refresh action; it does not switch or cycle audio devices.
+This plugin reads the current default audio render endpoint from Windows and renders its friendly name on a Stream Deck key. It is a display action; it does not switch or cycle audio devices.
+
+The displayed name stays in sync without polling: a long-running PowerShell + C# subprocess registers an `IMMNotificationClient` callback with the Windows Core Audio API, and reports default-device, hot-plug, and state-change events back to the plugin in real time.
 
 ### Features
 
 - Shows the current default Windows audio output device on the key.
-- Press the key to re-detect and refresh the displayed name.
+- Reactive updates: the key refreshes automatically when Windows changes the default device, when devices are added or removed, or when device state changes.
+- Press the key at any time to force a manual re-detect.
+- Burst events (e.g. unplugging a headset, which fires several callbacks back-to-back) are coalesced into one detect via a 250 ms debounce.
 - Property inspector options:
   - `customLabel`: override the auto-detected name with a fixed string.
   - `maxLength`: truncate the displayed name at a chosen length.
@@ -24,6 +28,7 @@ This plugin reads the current default audio render endpoint from Windows and ren
   1. PowerShell + embedded C# Core Audio COM (`IMMDeviceEnumerator` / `GetDefaultAudioEndpoint`).
   2. Retry of the PowerShell path once on transient failure.
   3. Windows Registry fallback that reads `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render`.
+- Watcher subprocess auto-respawns with exponential backoff (1, 2, 5, 10, 30 s) if it crashes, and re-stages the script if `%TEMP%` is cleared between runs.
 - File-based plugin logging under `<plugin-dir>/logs`, plus SDK trace logs.
 
 ### Tech stack
@@ -31,10 +36,10 @@ This plugin reads the current default audio render endpoint from Windows and ren
 - Elgato Stream Deck SDK v2 (`@elgato/streamdeck`).
 - TypeScript, bundled with Rollup to a single ES module.
 - Node.js runtime (Stream Deck-bundled Node 20).
-- PowerShell with embedded C# (`Add-Type`) calling the Windows Core Audio COM API.
+- PowerShell with embedded C# (`Add-Type`) calling the Windows Core Audio COM API for both one-shot detection and the long-running `IMMNotificationClient` watcher.
 - Windows Registry fallback via `reg.exe`.
 
-There is no C++ or native addon. The plugin runs on whatever Node 20 build Stream Deck ships, with no `node-gyp` or `binding.gyp` step.
+There is no C++ or native addon. The plugin runs on whatever Node 20 build Stream Deck ships, with no `node-gyp` or `binding.gyp` step. All Windows API access happens through PowerShell child processes, so there is no native ABI risk when Stream Deck swaps Node versions.
 
 ### Platform support
 
@@ -134,18 +139,56 @@ npm run restart
 
 ```
 src/
-  plugin.ts                 Entry point: logger init, action registration, SDK connect.
-  actions/audio-device.ts   The Stream Deck action class (key lifecycle, refresh logic).
-  audio/detector.ts         PowerShell-first detector with registry fallback.
-  audio/powershell-script.ts Embedded PowerShell + C# COM script payload.
-  utils/logger.ts           File-based logger.
-  utils/name-shortener.ts   Display-name formatting helpers.
+  plugin.ts                  Entry point: logger init, action registration, watcher start, SDK connect, shutdown handlers.
+  actions/audio-device.ts    The Stream Deck action class (key lifecycle, refresh logic, debounced refreshAll).
+  audio/detector.ts          PowerShell-first detector with registry fallback.
+  audio/powershell-script.ts One-shot detection PowerShell + C# COM script payload.
+  audio/watcher.ts           Long-running watcher subprocess manager (spawn, parse, respawn, stop).
+  audio/watcher-script.ts    Watcher PowerShell + C# payload that registers IMMNotificationClient.
+  utils/logger.ts            File-based logger.
+  utils/name-shortener.ts    Display-name formatting helpers.
 com.nathan.defaultaudio.sdPlugin/
-  manifest.json             Stream Deck plugin manifest.
-  bin/plugin.js             Build output (created by Rollup).
-  ui/audio-device.html      Property inspector.
-  imgs/                     Plugin and action icons.
+  manifest.json              Stream Deck plugin manifest.
+  bin/plugin.js              Build output (created by Rollup).
+  ui/audio-device.html       Property inspector.
+  imgs/                      Plugin and action icons.
 ```
+
+## Architecture
+
+```
+Stream Deck app
+   |   (WebSocket, @elgato/streamdeck SDK)
+   v
+plugin.js (Node 20, Stream Deck-bundled)
+   |
+   +-- AudioDeviceAction      handles key events, calls refresh / scheduleRefreshAll
+   |
+   +-- AudioDetector          spawns powershell.exe per detect (one-shot)
+   |        |
+   |        v
+   |     PowerShell + C# Add-Type --> Core Audio COM (IMMDeviceEnumerator)
+   |
+   +-- AudioWatcher           manages one long-lived powershell.exe
+            |
+            v
+         PowerShell + C# Add-Type --> IMMNotificationClient registered with the
+                                       Core Audio enumerator; emits one tab-
+                                       delimited line per change event back to
+                                       Node over stdout. Node debounces and
+                                       calls refreshAll().
+```
+
+The watcher subprocess blocks on stdin. The plugin sends `STOP\n` on shutdown for a graceful unregister; if it does not exit within 500 ms, it is `SIGKILL`'d. Idle resource cost is roughly 30 to 50 MB RAM and approximately 0% CPU until Windows fires an event.
+
+## Troubleshooting
+
+Plugin logs are written to `<plugin-install-dir>/logs/plugin.log`, with up to three rotated files of 1 MiB each. Stream Deck's own SDK trace logs are written alongside.
+
+- **Key shows `Unknown` or `…`**: detection failed on both PowerShell and registry paths. Check the log for the underlying cause (most often PowerShell execution policy or a locked-down environment that blocks `reg.exe`).
+- **Reactive updates stop working but press-to-refresh still works**: the watcher subprocess crashed and is in respawn backoff. The log will show `Watcher · respawning in <delay>ms`. After up to 30 s the next attempt runs; if it keeps failing the underlying cause (usually a Core Audio COM failure or PowerShell startup error) is logged.
+- **Plugin appears to hang on first launch**: the embedded C# `Add-Type` compile cache is cold; first detect can take 3 to 5 seconds on a fresh Windows session. Subsequent detects are fast.
+- **`%TEMP%` was cleared by a cleanup tool**: both the detector and the watcher re-stage their `.ps1` payload on the next call, so this self-heals.
 
 ## License
 
