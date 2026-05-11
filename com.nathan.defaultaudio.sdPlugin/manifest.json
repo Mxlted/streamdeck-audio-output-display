@@ -1,8 +1,8 @@
 {
     "Name": "Default Audio Device",
-    "Description": "Displays the current default Windows audio output device on the key. Press to refresh.",
+    "Description": "Displays and sets default Windows audio devices from Stream Deck keys.",
     "Author": "Nathan",
-    "Version": "1.1.0.0",
+    "Version": "1.2.0.0",
     "Icon": "imgs/plugin/category-icon",
     "URL": "https://github.com/",
     "SDKVersion": 2,
@@ -30,7 +30,9 @@
             "Icon": "imgs/actions/audio-device/icon",
             "Tooltip": "Shows the current default audio output device. Press to refresh.",
             "PropertyInspectorPath": "ui/audio-device.html",
-            "Controllers": ["Keypad"],
+            "Controllers": [
+                "Keypad"
+            ],
             "States": [
                 {
                     "Image": "imgs/actions/audio-device/key",
@@ -44,6 +46,52 @@
             ],
             "DisableAutomaticStates": true,
             "SupportedInMultiActions": false
+        },
+        {
+            "Name": "Set Default Output",
+            "UUID": "com.nathan.defaultaudio.set-output",
+            "Icon": "imgs/actions/audio-device/icon",
+            "Tooltip": "Sets the default Windows audio output device by name, including communications default.",
+            "PropertyInspectorPath": "ui/set-default-device.html",
+            "Controllers": [
+                "Keypad"
+            ],
+            "States": [
+                {
+                    "Image": "imgs/actions/audio-device/key",
+                    "TitleAlignment": "middle",
+                    "FontSize": 9,
+                    "FontStyle": "Bold",
+                    "FontFamily": "Arial",
+                    "TitleColor": "#FFFFFF",
+                    "ShowTitle": true
+                }
+            ],
+            "DisableAutomaticStates": true,
+            "SupportedInMultiActions": true
+        },
+        {
+            "Name": "Set Default Input",
+            "UUID": "com.nathan.defaultaudio.set-input",
+            "Icon": "imgs/actions/audio-device/icon",
+            "Tooltip": "Sets the default Windows audio input device by name, including communications default.",
+            "PropertyInspectorPath": "ui/set-default-device.html",
+            "Controllers": [
+                "Keypad"
+            ],
+            "States": [
+                {
+                    "Image": "imgs/actions/audio-device/key",
+                    "TitleAlignment": "middle",
+                    "FontSize": 9,
+                    "FontStyle": "Bold",
+                    "FontFamily": "Arial",
+                    "TitleColor": "#FFFFFF",
+                    "ShowTitle": true
+                }
+            ],
+            "DisableAutomaticStates": true,
+            "SupportedInMultiActions": true
         }
     ]
 }

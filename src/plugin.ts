@@ -11,6 +11,10 @@ import * as url from "node:url";
 
 import { initLogger, LogLevel as MyLogLevel } from "./utils/logger.js";
 import { AudioDeviceAction } from "./actions/audio-device.js";
+import {
+    SetDefaultInputDeviceAction,
+    SetDefaultOutputDeviceAction,
+} from "./actions/set-default-device.js";
 import { AudioWatcher } from "./audio/watcher.js";
 
 // Resolve <plugin-dir>/logs relative to the bundled plugin.js, regardless of
@@ -38,7 +42,11 @@ log.info("plugin", `boot · node=${process.version} · cwd=${process.cwd()}`);
 
 // Register the action and create the watcher.
 const audioAction = new AudioDeviceAction();
+const setDefaultOutputAction = new SetDefaultOutputDeviceAction();
+const setDefaultInputAction = new SetDefaultInputDeviceAction();
 streamDeck.actions.registerAction(audioAction);
+streamDeck.actions.registerAction(setDefaultOutputAction);
+streamDeck.actions.registerAction(setDefaultInputAction);
 
 const watcher = new AudioWatcher((ev) => {
     // We only refresh on render-side changes (flow=0). Capture-flow events

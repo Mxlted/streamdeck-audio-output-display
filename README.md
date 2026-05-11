@@ -1,22 +1,25 @@
 # Default Audio Device (Stream Deck Plugin)
 
-A Windows Stream Deck plugin that displays the current default Windows audio output device on a key. The key updates automatically when Windows changes the default device, and you can press it at any time to force a re-detect.
+A Windows Stream Deck plugin that displays the current default Windows audio output device on a key, plus actions for setting the default output or input device. The display key updates automatically when Windows changes the default device, and you can press it at any time to force a re-detect.
 
 ## [Overview](#overview) · [Requirements](#requirements) · [Installation](#installation) · [Build from source](#build-from-source) · [Troubleshooting](#troubleshooting)
 
 ## Overview
 
-This plugin reads the current default audio render endpoint from Windows and renders its friendly name on a Stream Deck key. It is a display action; it does not switch or cycle audio devices.
+This plugin reads the current default audio render endpoint from Windows and renders its friendly name on a Stream Deck key. It also includes dedicated key actions for setting the default output or input device by friendly-name matching.
 
 The displayed name stays in sync without polling: a long-running PowerShell + C# subprocess registers an `IMMNotificationClient` callback with the Windows Core Audio API, and reports default-device, hot-plug, and state-change events back to the plugin in real time.
 
 ### Features
 
 - Shows the current default Windows audio output device on the key.
+- Sets a configured output or input device as both the normal default and the communications default.
+- Setter actions show a dropdown of currently available devices; output actions list output devices and input actions list input devices.
+- Setter actions save the selected friendly name first, with the endpoint ID kept behind the scenes as a tie-breaker/fallback.
 - Reactive updates: the key refreshes automatically when Windows changes the default device, when devices are added or removed, or when device state changes.
 - Press the key at any time to force a manual re-detect.
 - Burst events (e.g. unplugging a headset, which fires several callbacks back-to-back) are coalesced into one detect via a 250 ms debounce.
-- Property inspector options:
+- Display action property inspector options:
   - `customLabel`: override the auto-detected name with a fixed string.
   - `maxLength`: truncate the displayed name at a chosen length.
   - `aggressiveShorten`: strip driver-style suffixes such as `(Realtek(R) Audio)`.
@@ -24,6 +27,8 @@ The displayed name stays in sync without polling: a long-running PowerShell + C#
     - `role` (default): show only the role part, e.g. `Speakers`.
     - `model`: show only the driver/model part, e.g. `Realtek(R) Audio`.
     - `full`: show both, cleaned up.
+- Setter action property inspector:
+  - One device dropdown populated from the currently active Windows input or output endpoints.
 - Detection strategy with hard timeouts and retry:
   1. PowerShell + embedded C# Core Audio COM (`IMMDeviceEnumerator` / `GetDefaultAudioEndpoint`).
   2. Retry of the PowerShell path once on transient failure.
@@ -58,14 +63,14 @@ This is the recommended path for everyday users.
 1. Download the latest `.streamDeckPlugin` file from the Releases page:
    https://github.com/Mxlted/streamdeck-audio-output-display/releases
 2. Double-click the downloaded file. The Stream Deck application will prompt to install the plugin.
-3. In the Stream Deck app, open the Actions list and drag **Default Audio** onto a key.
-4. (Optional) Open the property inspector for the key to configure display options:
+3. In the Stream Deck app, open the Actions list and drag **Default Audio**, **Set Default Output**, or **Set Default Input** onto a key.
+4. (Optional) Open the **Default Audio** property inspector to configure display options:
    - **Custom label** to force a fixed string.
    - **Max length** to control truncation.
    - **Aggressive shorten** to strip driver suffixes.
    - **Name style** to pick `role`, `model`, or `full`.
 
-Press the key at any time to re-detect the current default device.
+For setter actions, pick the device from the dropdown. Pressing the key sets that device for all Windows audio roles, including communications.
 
 ## Build from source
 
@@ -141,8 +146,11 @@ npm run restart
 src/
   plugin.ts                  Entry point: logger init, action registration, watcher start, SDK connect, shutdown handlers.
   actions/audio-device.ts    The Stream Deck action class (key lifecycle, refresh logic, debounced refreshAll).
+  actions/set-default-device.ts Stream Deck actions for setting default output/input devices.
   audio/detector.ts          PowerShell-first detector with registry fallback.
+  audio/default-device-setter.ts PowerShell-backed runner for setting default endpoints.
   audio/powershell-script.ts One-shot detection PowerShell + C# COM script payload.
+  audio/set-default-script.ts Setter PowerShell + C# payload using Core Audio policy COM.
   audio/watcher.ts           Long-running watcher subprocess manager (spawn, parse, respawn, stop).
   audio/watcher-script.ts    Watcher PowerShell + C# payload that registers IMMNotificationClient.
   utils/logger.ts            File-based logger.
@@ -150,7 +158,8 @@ src/
 com.nathan.defaultaudio.sdPlugin/
   manifest.json              Stream Deck plugin manifest.
   bin/plugin.js              Build output (created by Rollup).
-  ui/audio-device.html       Property inspector.
+  ui/audio-device.html       Display action property inspector.
+  ui/set-default-device.html Setter action property inspector.
   imgs/                      Plugin and action icons.
 ```
 
@@ -164,10 +173,17 @@ plugin.js (Node 20, Stream Deck-bundled)
    |
    +-- AudioDeviceAction      handles key events, calls refresh / scheduleRefreshAll
    |
+   +-- SetDefault...Action    handles input/output setter key presses
+   |
    +-- AudioDetector          spawns powershell.exe per detect (one-shot)
    |        |
    |        v
    |     PowerShell + C# Add-Type --> Core Audio COM (IMMDeviceEnumerator)
+   |
+   +-- AudioDefaultDeviceSetter
+   |        |
+   |        v
+   |     PowerShell + C# Add-Type --> Core Audio policy COM (IPolicyConfig)
    |
    +-- AudioWatcher           manages one long-lived powershell.exe
             |
