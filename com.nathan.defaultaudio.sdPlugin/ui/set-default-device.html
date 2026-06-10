@@ -81,8 +81,9 @@
             if (!option || !option.value) return;
 
             settings = {
+                ...settings,
                 selectedDeviceId: option.value,
-                selectedDeviceName: option.dataset.name,
+                selectedDeviceName: option.dataset.name || "",
             };
 
             send({

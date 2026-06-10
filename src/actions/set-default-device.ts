@@ -196,22 +196,31 @@ abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDevi
         const current = streamDeck.ui.current;
         if (!current || current.action.manifestId !== this.manifestId) return;
 
+        let payload: DeviceListPayload | DeviceListErrorPayload;
         try {
             const devices = await this.setter.listDevices(this.flow);
-            await current.sendToPropertyInspector({
+            payload = {
                 type: "device-list",
                 devices: devices.map(toDeviceListItemPayload),
-            } satisfies DeviceListPayload);
+            };
         } catch (err) {
             const message =
                 err instanceof SetDefaultDeviceError || err instanceof Error
                     ? err.message
                     : String(err);
             log.error(this.logScope, `device list failed: ${message}`, err);
-            await current.sendToPropertyInspector({
+            payload = {
                 type: "device-list-error",
                 message,
-            } satisfies DeviceListErrorPayload);
+            };
+        }
+
+        if (streamDeck.ui.current !== current) return;
+
+        try {
+            await current.sendToPropertyInspector(payload);
+        } catch (err) {
+            log.warn(this.logScope, "sendToPropertyInspector failed", err);
         }
     }
 }

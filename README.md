@@ -204,7 +204,7 @@ Plugin logs are written to `<plugin-install-dir>/logs/plugin.log`, with up to th
 - **Key shows `Unknown` or `…`**: detection failed on both PowerShell and registry paths. Check the log for the underlying cause (most often PowerShell execution policy or a locked-down environment that blocks `reg.exe`).
 - **Reactive updates stop working but press-to-refresh still works**: the watcher subprocess crashed and is in respawn backoff. The log will show `Watcher · respawning in <delay>ms`. After up to 30 s the next attempt runs; if it keeps failing the underlying cause (usually a Core Audio COM failure or PowerShell startup error) is logged.
 - **Plugin appears to hang on first launch**: the embedded C# `Add-Type` compile cache is cold; first detect can take 3 to 5 seconds on a fresh Windows session. Subsequent detects are fast.
-- **`%TEMP%` was cleared by a cleanup tool**: both the detector and the watcher re-stage their `.ps1` payload on the next call, so this self-heals.
+- **`%TEMP%` was cleared by a cleanup tool**: the detector, setter, and watcher re-stage their `.ps1` payload on the next call, so this self-heals.
 
 ## License
 

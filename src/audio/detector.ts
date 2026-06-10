@@ -114,7 +114,14 @@ export class AudioDetector {
      * Add-Type cache hot across calls.
      */
     private async ensureScriptOnDisk(): Promise<string> {
-        if (this.psScriptPath) return this.psScriptPath;
+        if (this.psScriptPath) {
+            try {
+                await fs.access(this.psScriptPath);
+                return this.psScriptPath;
+            } catch {
+                /* %TEMP% may have been cleaned; re-stage below. */
+            }
+        }
 
         const dir = path.join(os.tmpdir(), "com.nathan.defaultaudio");
         await fs.mkdir(dir, { recursive: true });
@@ -128,8 +135,8 @@ export class AudioDetector {
 
     private parsePsOutput(stdout: string): string {
         // The script writes one line: "OK\t<name>" or "ERR\t<reason>".
-        // Tolerate trailing newlines and stray BOMs.
-        const line = stdout.replace(/^\uFEFF/, "").split(/\r?\n/).find((l) => l.length > 0);
+        // Tolerate trailing newlines, stray BOMs, and incidental host output.
+        const line = this.findProtocolLine(stdout);
         if (!line) throw new Error("empty PowerShell output");
 
         const tabIdx = line.indexOf("\t");
@@ -144,6 +151,13 @@ export class AudioDetector {
         }
 
         throw new Error(`PowerShell error: ${payload || "unknown"}`);
+    }
+
+    private findProtocolLine(stdout: string): string | undefined {
+        return stdout
+            .replace(/^\uFEFF/, "")
+            .split(/\r?\n/)
+            .find((line) => line.startsWith("OK\t") || line.startsWith("ERR\t"));
     }
 
     // ---------- Registry fallback path ----------

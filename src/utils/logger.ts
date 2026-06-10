@@ -45,7 +45,7 @@ class Logger {
 
     constructor(options: LoggerOptions) {
         this.maxSize = options.maxSize ?? 1024 * 1024;
-        this.maxFiles = options.maxFiles ?? 3;
+        this.maxFiles = Math.max(1, Math.floor(options.maxFiles ?? 3));
         this.minLevel = options.minLevel ?? LogLevel.DEBUG;
 
         // Ensure log directory exists. Fall back to %TEMP% if we can't write.
@@ -142,6 +142,13 @@ class Logger {
             if (err || stats.size < this.maxSize) return;
 
             // Shift older files: plugin.log.2 -> plugin.log.3, plugin.log.1 -> plugin.log.2, etc.
+            try {
+                const oldest = `${this.logFile}.${this.maxFiles}`;
+                if (fs.existsSync(oldest)) fs.rmSync(oldest, { force: true });
+            } catch {
+                /* ignore */
+            }
+
             for (let i = this.maxFiles - 1; i >= 1; i--) {
                 const src = `${this.logFile}.${i}`;
                 const dst = `${this.logFile}.${i + 1}`;

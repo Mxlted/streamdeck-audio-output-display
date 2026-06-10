@@ -26,6 +26,7 @@ import { shortenDeviceName, wrapForKey } from "../utils/name-shortener.js";
 import { getLogger } from "../utils/logger.js";
 
 const REFRESH_DEBOUNCE_MS = 250;
+type PrefetchedDetection = DetectionResult | null | undefined;
 
 /**
  * Settings persisted per action instance.
@@ -134,22 +135,40 @@ export class AudioDeviceAction extends SingletonAction<AudioDeviceSettings> {
         if (this.visible.size === 0) return;
         const log = getLogger();
 
-        // Detect once; share the result across keys so we don't spawn one
-        // PowerShell process per visible key.
-        let result: DetectionResult | undefined;
-        try {
-            result = await this.detector.detect();
-        } catch (err) {
-            const causes =
-                err instanceof DetectionError ? err.causes.join(" | ") : String(err);
-            log.error("Action", "refreshAll: detection failed", causes);
-            // Fall through with result === undefined; refresh() will surface
-            // the error per-key.
-        }
+        const visibleActions = Array.from(this.visible.values());
+        const entries: Array<{
+            action: KeyAction<AudioDeviceSettings>;
+            settings: AudioDeviceSettings | undefined;
+        }> = [];
 
-        for (const action of this.visible.values()) {
+        for (const action of visibleActions) {
             try {
                 const settings = await action.getSettings<AudioDeviceSettings>();
+                entries.push({ action, settings });
+            } catch (err) {
+                log.warn("Action", `refreshAll: getSettings failed for ${action.id}`, err);
+            }
+        }
+
+        if (entries.length === 0) return;
+
+        // Detect once; share the result across keys so we don't spawn one
+        // PowerShell process per visible key. If every visible key has a custom
+        // label, skip detection entirely.
+        let result: PrefetchedDetection;
+        if (entries.some(({ settings }) => !hasCustomLabel(settings))) {
+            try {
+                result = await this.detector.detect();
+            } catch (err) {
+                const causes =
+                    err instanceof DetectionError ? err.causes.join(" | ") : String(err);
+                log.error("Action", "refreshAll: detection failed", causes);
+                result = null;
+            }
+        }
+
+        for (const { action, settings } of entries) {
+            try {
                 await this.refresh(action, settings, result);
             } catch (err) {
                 log.warn("Action", `refreshAll: failed for ${action.id}`, err);
@@ -165,12 +184,12 @@ export class AudioDeviceAction extends SingletonAction<AudioDeviceSettings> {
     private async refresh(
         key: KeyAction<AudioDeviceSettings>,
         settings: AudioDeviceSettings | undefined,
-        preDetected?: DetectionResult,
+        preDetected?: PrefetchedDetection,
     ): Promise<void> {
         const log = getLogger();
 
         // Allow user override — fast path, no detect needed.
-        if (settings?.customLabel && settings.customLabel.trim().length > 0) {
+        if (hasCustomLabel(settings)) {
             const label = wrapForKey(settings.customLabel.trim());
             log.debug("Action", `using custom label: "${label}"`);
             try {
@@ -192,6 +211,11 @@ export class AudioDeviceAction extends SingletonAction<AudioDeviceSettings> {
             }
         }
 
+        if (preDetected === null) {
+            await this.renderDetectionFailure(key);
+            return;
+        }
+
         let result = preDetected;
         if (!result) {
             try {
@@ -200,12 +224,7 @@ export class AudioDeviceAction extends SingletonAction<AudioDeviceSettings> {
                 const causes =
                     err instanceof DetectionError ? err.causes.join(" | ") : String(err);
                 log.error("Action", "detection failed", causes);
-                try {
-                    await key.setTitle("Unknown");
-                    await key.showAlert();
-                } catch {
-                    /* ignore */
-                }
+                await this.renderDetectionFailure(key);
                 return;
             }
         }
@@ -229,4 +248,21 @@ export class AudioDeviceAction extends SingletonAction<AudioDeviceSettings> {
             log.warn("Action", `setTitle failed for ${key.id}`, err);
         }
     }
+
+    private async renderDetectionFailure(
+        key: KeyAction<AudioDeviceSettings>,
+    ): Promise<void> {
+        try {
+            await key.setTitle("Unknown");
+            await key.showAlert();
+        } catch {
+            /* ignore */
+        }
+    }
+}
+
+function hasCustomLabel(
+    settings: AudioDeviceSettings | undefined,
+): settings is AudioDeviceSettings & { customLabel: string } {
+    return typeof settings?.customLabel === "string" && settings.customLabel.trim().length > 0;
 }

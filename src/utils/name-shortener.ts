@@ -11,6 +11,8 @@
  */
 
 /** Words/markers we strip aggressively because they add noise without info. */
+const DEFAULT_MAX_LENGTH = 22;
+
 const NOISE_PATTERNS: RegExp[] = [
     /\(R\)/gi,
     /\(TM\)/gi,
@@ -59,7 +61,7 @@ export interface ShortenOptions {
  *   5. Collapse whitespace and truncate with ellipsis if needed.
  */
 export function shortenDeviceName(raw: string, options: ShortenOptions = {}): string {
-    const maxLength = options.maxLength ?? 22;
+    const maxLength = normalizeMaxLength(options.maxLength);
     const aggressive = options.aggressive ?? true;
     const style = options.style ?? "role";
 
@@ -122,6 +124,7 @@ function finalize(s: string, maxLength: number): string {
     if (s.length === 0) return "Unknown";
 
     if (s.length > maxLength) {
+        if (maxLength <= 1) return "…";
         const truncated = s.slice(0, maxLength - 1);
         const lastSpace = truncated.lastIndexOf(" ");
         if (lastSpace > maxLength * 0.6) {
@@ -131,6 +134,12 @@ function finalize(s: string, maxLength: number): string {
         }
     }
     return s;
+}
+
+function normalizeMaxLength(maxLength: number | undefined): number {
+    const parsed = Number(maxLength);
+    if (!Number.isFinite(parsed) || parsed < 1) return DEFAULT_MAX_LENGTH;
+    return Math.floor(parsed);
 }
 
 /**

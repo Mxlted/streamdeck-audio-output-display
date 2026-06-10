@@ -180,21 +180,21 @@ export class AudioWatcher {
                 const role = parseIntSafe(parts[2]);
                 const deviceId = parts[3] ?? "";
                 log.info("Watcher", `default changed flow=${flow} role=${role} id=${deviceId}`);
-                this.callback({ type: "default-changed", flow, role, deviceId });
+                this.emitEvent({ type: "default-changed", flow, role, deviceId });
                 return;
             }
             case "ADDED":
                 log.info("Watcher", `device added id=${parts[1] ?? ""}`);
-                this.callback({ type: "device-added", deviceId: parts[1] ?? "" });
+                this.emitEvent({ type: "device-added", deviceId: parts[1] ?? "" });
                 return;
             case "REMOVED":
                 log.info("Watcher", `device removed id=${parts[1] ?? ""}`);
-                this.callback({ type: "device-removed", deviceId: parts[1] ?? "" });
+                this.emitEvent({ type: "device-removed", deviceId: parts[1] ?? "" });
                 return;
             case "STATE": {
                 const state = parseIntSafe(parts[2]);
                 log.debug("Watcher", `device state id=${parts[1] ?? ""} state=${state}`);
-                this.callback({ type: "device-state", deviceId: parts[1] ?? "", state });
+                this.emitEvent({ type: "device-state", deviceId: parts[1] ?? "", state });
                 return;
             }
             case "ERR":
@@ -202,6 +202,14 @@ export class AudioWatcher {
                 return;
             default:
                 log.debug("Watcher", `unhandled line: ${line}`);
+        }
+    }
+
+    private emitEvent(ev: WatcherEvent): void {
+        try {
+            this.callback(ev);
+        } catch (err) {
+            getLogger().error("Watcher", "event callback failed", err);
         }
     }
 

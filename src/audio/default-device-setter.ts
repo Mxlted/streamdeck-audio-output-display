@@ -110,7 +110,14 @@ export class AudioDefaultDeviceSetter {
      * reused for both input and output setter actions.
      */
     private async ensureScriptOnDisk(): Promise<string> {
-        if (this.psScriptPath) return this.psScriptPath;
+        if (this.psScriptPath) {
+            try {
+                await fs.access(this.psScriptPath);
+                return this.psScriptPath;
+            } catch {
+                /* %TEMP% may have been cleaned; re-stage below. */
+            }
+        }
 
         const dir = path.join(os.tmpdir(), "com.nathan.defaultaudio");
         await fs.mkdir(dir, { recursive: true });
@@ -127,15 +134,31 @@ export class AudioDefaultDeviceSetter {
         //   OK<TAB><name><TAB><deviceId><TAB><matchedBy>
         // or:
         //   ERR<TAB><reason>
-        const line = stdout.replace(/^\uFEFF/, "").split(/\r?\n/).find((l) => l.length > 0);
+        const line = this.findProtocolLine(stdout);
         if (!line) throw new SetDefaultDeviceError("empty PowerShell output");
 
-        const parts = line.split("\t");
-        const status = parts[0];
+        const tabIdx = line.indexOf("\t");
+        if (tabIdx === -1) {
+            throw new SetDefaultDeviceError(`malformed PowerShell output: ${line}`);
+        }
+
+        const status = line.slice(0, tabIdx);
+        const payload = line.slice(tabIdx + 1);
         if (status === "OK") {
-            const name = parts[1]?.trim() ?? "";
-            const deviceId = parts[2]?.trim() ?? "";
-            const matchedBy = parts[3]?.trim() ?? "unknown";
+            const matchedByTabIdx = payload.lastIndexOf("\t");
+            if (matchedByTabIdx === -1) {
+                throw new SetDefaultDeviceError(`malformed PowerShell OK output: ${line}`);
+            }
+
+            const nameAndDeviceId = payload.slice(0, matchedByTabIdx);
+            const deviceIdTabIdx = nameAndDeviceId.lastIndexOf("\t");
+            if (deviceIdTabIdx === -1) {
+                throw new SetDefaultDeviceError(`malformed PowerShell OK output: ${line}`);
+            }
+
+            const name = nameAndDeviceId.slice(0, deviceIdTabIdx).trim();
+            const deviceId = nameAndDeviceId.slice(deviceIdTabIdx + 1).trim();
+            const matchedBy = payload.slice(matchedByTabIdx + 1).trim() || "unknown";
 
             if (!name || !deviceId) {
                 throw new SetDefaultDeviceError(`malformed PowerShell OK output: ${line}`);
@@ -145,7 +168,7 @@ export class AudioDefaultDeviceSetter {
         }
 
         if (status === "ERR") {
-            throw new SetDefaultDeviceError(parts.slice(1).join("\t").trim() || "unknown");
+            throw new SetDefaultDeviceError(payload.trim() || "unknown");
         }
 
         throw new SetDefaultDeviceError(`malformed PowerShell output: ${line}`);
@@ -156,7 +179,7 @@ export class AudioDefaultDeviceSetter {
         //   OK<TAB>[{"id":"...","name":"..."}]
         // or:
         //   ERR<TAB><reason>
-        const line = stdout.replace(/^\uFEFF/, "").split(/\r?\n/).find((l) => l.length > 0);
+        const line = this.findProtocolLine(stdout);
         if (!line) throw new SetDefaultDeviceError("empty PowerShell output");
 
         const tabIdx = line.indexOf("\t");
@@ -201,6 +224,13 @@ export class AudioDefaultDeviceSetter {
                 return undefined;
             })
             .filter((item): item is AudioEndpointDevice => item !== undefined);
+    }
+
+    private findProtocolLine(stdout: string): string | undefined {
+        return stdout
+            .replace(/^\uFEFF/, "")
+            .split(/\r?\n/)
+            .find((line) => line.startsWith("OK\t") || line.startsWith("ERR\t"));
     }
 
     /**
