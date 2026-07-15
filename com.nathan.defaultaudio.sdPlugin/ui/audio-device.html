@@ -1,50 +1,51 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <title>Default Audio Device</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-    <!-- The streamdeck-sdpi web component library is bundled with Stream Deck
-         6.5+ and renders Elgato-styled inputs that auto-bind to settings. -->
-    <script src="https://sdpi-components.dev/releases/v4/sdpi-components.js"></script>
+    <meta
+        http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src ws://127.0.0.1:*"
+    />
+    <title>Default Audio Device</title>
+    <link rel="stylesheet" href="property-inspector.css" />
+    <script defer src="pi-connection.js"></script>
+    <script defer src="audio-device.js"></script>
 </head>
 <body>
-    <sdpi-item label="Custom label">
-        <sdpi-textfield
-            setting="customLabel"
-            placeholder="Leave blank to auto-detect"
-            maxlength="40">
-        </sdpi-textfield>
-    </sdpi-item>
+    <main>
+        <label class="field-row" for="customLabel">
+            <span>Custom label</span>
+            <input id="customLabel" type="text" maxlength="40" placeholder="Auto-detect" />
+        </label>
 
-    <sdpi-item label="Show">
-        <sdpi-select setting="nameStyle" default="role">
-            <option value="role">Role (e.g. "Speakers")</option>
-            <option value="model">Model (e.g. "Realtek(R) Audio")</option>
-            <option value="full">Both</option>
-        </sdpi-select>
-    </sdpi-item>
+        <label class="field-row" for="nameStyle">
+            <span>Show</span>
+            <select id="nameStyle">
+                <option value="role">Role (Speakers)</option>
+                <option value="model">Model (Realtek Audio)</option>
+                <option value="full">Both</option>
+            </select>
+        </label>
 
-    <sdpi-item label="Max chars">
-        <sdpi-range
-            setting="maxLength"
-            default="22"
-            min="6"
-            max="40"
-            step="1"
-            showlabels>
-        </sdpi-range>
-    </sdpi-item>
+        <label class="field-row" for="maxLength">
+            <span>Max chars</span>
+            <span class="range-control">
+                <input id="maxLength" type="range" min="6" max="40" step="1" value="22" />
+                <output id="maxLengthValue" for="maxLength">22</output>
+            </span>
+        </label>
 
-    <sdpi-item label="Aggressive shorten">
-        <sdpi-checkbox setting="aggressiveShorten" default="true" label="Strip driver noise"></sdpi-checkbox>
-    </sdpi-item>
+        <label class="field-row" for="aggressiveShorten">
+            <span>Shorten</span>
+            <span class="checkbox-control">
+                <input id="aggressiveShorten" type="checkbox" checked />
+                <span>Strip driver noise</span>
+            </span>
+        </label>
 
-    <sdpi-item label="Tip">
-        <sdpi-item-value>
-            Press the key on the deck to refresh the displayed device.
-        </sdpi-item-value>
-    </sdpi-item>
+        <p class="hint">Press the Stream Deck key to force a fresh device read.</p>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+    </main>
 </body>
 </html>

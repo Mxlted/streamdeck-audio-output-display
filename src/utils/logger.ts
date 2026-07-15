@@ -42,6 +42,7 @@ class Logger {
     private minLevel: LogLevel;
     private writing = false;
     private queue: string[] = [];
+    private flushWaiters: Array<() => void> = [];
 
     constructor(options: LoggerOptions) {
         this.maxSize = options.maxSize ?? 1024 * 1024;
@@ -86,6 +87,24 @@ class Logger {
         return this.logFile;
     }
 
+    /** Wait until queued log entries are on disk, up to the supplied deadline. */
+    flushAndWait(timeoutMs = 500): Promise<void> {
+        if (!this.writing && this.queue.length === 0) return Promise.resolve();
+
+        return new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve();
+            };
+            const timer = setTimeout(finish, Math.max(1, timeoutMs));
+            this.flushWaiters.push(finish);
+            this.flush();
+        });
+    }
+
     private write(level: LogLevel, scope: string, message: string, meta?: unknown): void {
         if (level < this.minLevel) return;
 
@@ -109,7 +128,11 @@ class Logger {
         line += "\n";
 
         // Mirror to stderr so it shows up in Stream Deck's debug console too.
-        process.stderr.write(line);
+        try {
+            process.stderr.write(line);
+        } catch {
+            /* stderr may already be closed during host shutdown. */
+        }
 
         // Buffer + flush to avoid sync I/O on the event loop hot path.
         this.queue.push(line);
@@ -124,22 +147,32 @@ class Logger {
         this.queue.length = 0;
 
         fs.appendFile(this.logFile, batch, (err) => {
-            this.writing = false;
-
             if (err) {
                 process.stderr.write(`[Logger] write failed: ${err.message}\n`);
+                this.finishWrite();
             } else {
-                this.maybeRotate();
+                this.maybeRotate(() => this.finishWrite());
             }
-
-            // If new entries arrived during the write, flush them too.
-            if (this.queue.length > 0) this.flush();
         });
     }
 
-    private maybeRotate(): void {
+    private finishWrite(): void {
+        this.writing = false;
+        if (this.queue.length > 0) {
+            this.flush();
+            return;
+        }
+
+        const waiters = this.flushWaiters.splice(0);
+        for (const resolve of waiters) resolve();
+    }
+
+    private maybeRotate(done: () => void): void {
         fs.stat(this.logFile, (err, stats) => {
-            if (err || stats.size < this.maxSize) return;
+            if (err || stats.size < this.maxSize) {
+                done();
+                return;
+            }
 
             // Shift older files: plugin.log.2 -> plugin.log.3, plugin.log.1 -> plugin.log.2, etc.
             try {
@@ -164,6 +197,7 @@ class Logger {
             } catch {
                 /* ignore - next write will recreate */
             }
+            done();
         });
     }
 }

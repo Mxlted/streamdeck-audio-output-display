@@ -1,21 +1,9 @@
-/**
- * AudioDeviceAction - Stream Deck key action.
- *
- * Lifecycle:
- *   - onWillAppear: detect device, set the title (action may be a Key or Dial — narrowed)
- *   - onKeyDown:    re-detect on demand
- *   - onWillDisappear: drop the instance from the visible-set
- *
- * All visible key instances are tracked by their action.id so that a future
- * external trigger (e.g. an audio-change notification) can refresh them all.
- */
-
-import {
+import streamDeck, {
     action,
     SingletonAction,
-    KeyAction,
     type DidReceiveSettingsEvent,
     type JsonObject,
+    type KeyAction,
     type KeyDownEvent,
     type WillAppearEvent,
     type WillDisappearEvent,
@@ -26,238 +14,439 @@ import { shortenDeviceName, wrapForKey } from "../utils/name-shortener.js";
 import { getLogger } from "../utils/logger.js";
 
 const REFRESH_DEBOUNCE_MS = 250;
-type PrefetchedDetection = DetectionResult | null | undefined;
+const MEMORY_CACHE_MS = 750;
+const PERSISTED_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const PERSIST_MIN_INTERVAL_MS = 60 * 1000;
 
-/**
- * Settings persisted per action instance.
- *
- * The `JsonObject` constraint requires every property to be a JsonValue, so
- * we extend it directly rather than declaring a flat interface — that gives
- * us the index signature the SDK generics expect.
- */
 export interface AudioDeviceSettings extends JsonObject {
-    /** Override the auto-detected name with a fixed string (advanced). */
     customLabel?: string;
-    /** Max characters before truncation. */
     maxLength?: number;
-    /** Strip "(Realtek(R) Audio)"-style driver suffixes. */
     aggressiveShorten?: boolean;
-    /**
-     * Which part of "Friendly (Driver)" device names to display:
-     *   - "role"  → "Speakers"          (default — what type of device)
-     *   - "model" → "Realtek(R) Audio"  (the specific hardware/driver)
-     *   - "full"  → "Speakers (Realtek(R) Audio)"  (both, just cleaned up)
-     */
     nameStyle?: "role" | "model" | "full";
+}
+
+interface GlobalAudioSettings extends JsonObject {
+    lastDefaultOutputName?: string;
+    lastDefaultOutputUpdatedAt?: number;
+}
+
+export interface AudioDeviceActionOptions {
+    detector?: AudioDetector;
+    onActiveDetectionCountChanged?: (activeCount: number) => void;
 }
 
 @action({ UUID: "com.nathan.defaultaudio.show" })
 export class AudioDeviceAction extends SingletonAction<AudioDeviceSettings> {
-    private readonly detector = new AudioDetector();
-
-    /** Visible key instances, keyed by Stream Deck context id. */
+    private readonly detector: AudioDetector;
+    private readonly onActiveDetectionCountChanged?: (activeCount: number) => void;
     private readonly visible = new Map<string, KeyAction<AudioDeviceSettings>>();
-
-    /** Debounce timer for scheduleRefreshAll(); coalesces burst events. */
+    private readonly visibleSettings = new Map<string, AudioDeviceSettings>();
+    private readonly activeDetectionContexts = new Set<string>();
+    private readonly renderGenerations = new Map<string, number>();
     private refreshAllTimer: NodeJS.Timeout | null = null;
 
-    override async onWillAppear(
-        ev: WillAppearEvent<AudioDeviceSettings>,
-    ): Promise<void> {
-        getLogger().info("Action", `willAppear · context=${ev.action.id}`);
+    private lastDetection: DetectionResult | null = null;
+    private lastDetectionAt = 0;
+    private completedInvalidation = -1;
+    private invalidation = 0;
+    private detectionInFlight: Promise<DetectionResult> | null = null;
 
-        // ev.action is DialAction<T> | KeyAction<T>. We only support keys.
-        if (!ev.action.isKey()) {
-            getLogger().warn(
-                "Action",
-                `willAppear: action is not a key (manifest restricts to Keypad) — ignoring`,
+    private globalSettings: GlobalAudioSettings = {};
+    private globalSettingsLoaded = false;
+    private globalSettingsLoad: Promise<void> | null = null;
+    private persistChain: Promise<void> = Promise.resolve();
+    private lastPersistedName = "";
+    private lastPersistedAt = 0;
+
+    constructor(options: AudioDeviceActionOptions = {}) {
+        super();
+        this.detector = options.detector ?? new AudioDetector();
+        this.onActiveDetectionCountChanged = options.onActiveDetectionCountChanged;
+    }
+
+    override onWillAppear(ev: WillAppearEvent<AudioDeviceSettings>): void {
+        const log = getLogger();
+        log.info("Action", `willAppear · context=${ev.action.id}`);
+        if (!ev.action.isKey()) return;
+
+        this.visible.set(ev.action.id, ev.action);
+        this.visibleSettings.set(ev.action.id, ev.payload.settings ?? {});
+        void this.initializeVisibleKey(ev.action).catch((err) => {
+            log.warn("Action", `initial refresh failed for ${ev.action.id}`, err);
+        });
+    }
+
+    override onWillDisappear(ev: WillDisappearEvent<AudioDeviceSettings>): void {
+        getLogger().info("Action", `willDisappear · context=${ev.action.id}`);
+        this.visible.delete(ev.action.id);
+        this.visibleSettings.delete(ev.action.id);
+        this.renderGenerations.delete(ev.action.id);
+        this.setDetectionActive(ev.action.id, false);
+    }
+
+    override async onKeyDown(ev: KeyDownEvent<AudioDeviceSettings>): Promise<void> {
+        getLogger().info("Action", `keyDown · context=${ev.action.id}`);
+        this.invalidateDetection();
+        await this.refresh(ev.action, ev.payload.settings, true);
+    }
+
+    override onDidReceiveSettings(
+        ev: DidReceiveSettingsEvent<AudioDeviceSettings>,
+    ): void {
+        getLogger().info("Action", `didReceiveSettings · context=${ev.action.id}`);
+        if (!ev.action.isKey()) return;
+        if (this.visible.get(ev.action.id) !== ev.action) return;
+
+        this.visibleSettings.set(ev.action.id, ev.payload.settings ?? {});
+        this.setDetectionActive(ev.action.id, !hasCustomLabel(ev.payload.settings));
+        const generation = this.nextRenderGeneration(ev.action.id);
+        if (hasCustomLabel(ev.payload.settings)) {
+            void this.renderCustomLabel(
+                ev.action,
+                ev.payload.settings.customLabel,
+                generation,
             );
             return;
         }
 
-        this.visible.set(ev.action.id, ev.action);
-        await this.refresh(ev.action, ev.payload.settings);
+        if (this.lastDetection) {
+            void this.renderResult(
+                ev.action,
+                ev.payload.settings,
+                this.lastDetection,
+                generation,
+            );
+            return;
+        }
+
+        void this.refresh(ev.action, ev.payload.settings, false);
     }
 
-    override onWillDisappear(
-        ev: WillDisappearEvent<AudioDeviceSettings>,
-    ): void {
-        getLogger().info("Action", `willDisappear · context=${ev.action.id}`);
-        // ev.action here is a plain ActionContext - we just need the id.
-        this.visible.delete(ev.action.id);
+    /** Loads a last-known device name after the SDK connection is established. */
+    async hydrateCachedDevice(): Promise<void> {
+        if (this.globalSettingsLoaded) return;
+        if (this.globalSettingsLoad) return this.globalSettingsLoad;
+
+        const operation = this.loadCachedDevice();
+        this.globalSettingsLoad = operation;
+        try {
+            await operation;
+        } finally {
+            if (this.globalSettingsLoad === operation) this.globalSettingsLoad = null;
+        }
     }
 
-    override async onKeyDown(
-        ev: KeyDownEvent<AudioDeviceSettings>,
+    private async loadCachedDevice(): Promise<void> {
+        try {
+            const settings = await streamDeck.settings.getGlobalSettings<GlobalAudioSettings>();
+            this.globalSettings = settings;
+            this.globalSettingsLoaded = true;
+
+            const name = settings.lastDefaultOutputName?.trim() ?? "";
+            const updatedAt = Number(settings.lastDefaultOutputUpdatedAt ?? 0);
+            const cachedAt = Number.isFinite(updatedAt) ? updatedAt : 0;
+            const hasLiveDetection =
+                this.lastDetection !== null && this.lastDetection.source !== "cache";
+            if (!hasLiveDetection) {
+                this.lastPersistedName = name;
+                this.lastPersistedAt = cachedAt;
+            }
+
+            if (
+                !this.lastDetection &&
+                name &&
+                cachedAt > 0 &&
+                Date.now() - cachedAt <= PERSISTED_CACHE_MAX_AGE_MS
+            ) {
+                this.lastDetection = { name, source: "cache" };
+                this.lastDetectionAt = cachedAt;
+                getLogger().info("Action", `loaded cached device name: "${name}"`);
+            }
+        } catch (err) {
+            this.globalSettingsLoaded = true;
+            getLogger().warn("Action", "failed to load cached device name", err);
+        }
+    }
+
+    private async initializeVisibleKey(
+        key: KeyAction<AudioDeviceSettings>,
     ): Promise<void> {
-        // ev.action is already narrowed to KeyAction<T> by the event type.
-        getLogger().info("Action", `keyDown · context=${ev.action.id}`);
-        await this.refresh(ev.action, ev.payload.settings);
+        // Global settings are cheap and local. Loading them before starting the
+        // watcher avoids immediate cold-start subprocess pressure and lets a
+        // cached title render first during Stream Deck startup.
+        await this.hydrateCachedDevice();
+        if (this.visible.get(key.id) !== key) return;
+
+        const settings = this.visibleSettings.get(key.id) ?? {};
+        this.setDetectionActive(key.id, !hasCustomLabel(settings));
+        await this.refresh(key, settings, false);
     }
 
-    /**
-     * Fired whenever the property inspector saves new settings. We re-render
-     * immediately so the user can see their style choice take effect without
-     * needing to press the key.
-     */
-    override async onDidReceiveSettings(
-        ev: DidReceiveSettingsEvent<AudioDeviceSettings>,
-    ): Promise<void> {
-        getLogger().info(
-            "Action",
-            `didReceiveSettings · context=${ev.action.id}`,
-            ev.payload.settings,
-        );
-        if (!ev.action.isKey()) return;
-        await this.refresh(ev.action, ev.payload.settings);
-    }
-
-    /**
-     * Schedule a refresh of all visible keys, debounced. Multiple calls within
-     * REFRESH_DEBOUNCE_MS coalesce into a single detect — important because
-     * Windows often fires several IMMNotificationClient events back-to-back
-     * (state change + default change + property change) for one user action.
-     */
     scheduleRefreshAll(): void {
         if (this.refreshAllTimer) clearTimeout(this.refreshAllTimer);
         this.refreshAllTimer = setTimeout(() => {
             this.refreshAllTimer = null;
+            this.invalidateDetection();
             void this.refreshAll();
         }, REFRESH_DEBOUNCE_MS);
         this.refreshAllTimer.unref();
     }
 
-    /**
-     * Re-detect once and apply the result to every visible key. External
-     * callers should usually go through scheduleRefreshAll() instead.
-     */
     async refreshAll(): Promise<void> {
         if (this.visible.size === 0) return;
         const log = getLogger();
 
-        const visibleActions = Array.from(this.visible.values());
-        const entries: Array<{
-            action: KeyAction<AudioDeviceSettings>;
-            settings: AudioDeviceSettings | undefined;
-        }> = [];
+        const settingsResults = await Promise.allSettled(
+            Array.from(this.visible.values(), async (action) => ({
+                action,
+                settings: await action.getSettings<AudioDeviceSettings>(),
+                generation: this.nextRenderGeneration(action.id),
+            })),
+        );
 
-        for (const action of visibleActions) {
-            try {
-                const settings = await action.getSettings<AudioDeviceSettings>();
-                entries.push({ action, settings });
-            } catch (err) {
-                log.warn("Action", `refreshAll: getSettings failed for ${action.id}`, err);
-            }
-        }
-
+        const entries = settingsResults.flatMap((result) => {
+            if (result.status === "fulfilled") return [result.value];
+            log.warn("Action", "refreshAll: getSettings failed", result.reason);
+            return [];
+        });
         if (entries.length === 0) return;
 
-        // Detect once; share the result across keys so we don't spawn one
-        // PowerShell process per visible key. If every visible key has a custom
-        // label, skip detection entirely.
-        let result: PrefetchedDetection;
-        if (entries.some(({ settings }) => !hasCustomLabel(settings))) {
-            try {
-                result = await this.detector.detect();
-            } catch (err) {
-                const causes =
-                    err instanceof DetectionError ? err.causes.join(" | ") : String(err);
-                log.error("Action", "refreshAll: detection failed", causes);
-                result = null;
+        const automaticEntries = entries.filter(({ settings }) => !hasCustomLabel(settings));
+        const customEntries = entries.filter(({ settings }) => hasCustomLabel(settings));
+
+        await Promise.allSettled(
+            customEntries.map(({ action, settings, generation }) =>
+                this.renderCustomLabel(
+                    action,
+                    settings.customLabel as string,
+                    generation,
+                ),
+            ),
+        );
+        if (automaticEntries.length === 0) return;
+
+        let result: DetectionResult;
+        try {
+            result = await this.requestDetection();
+        } catch (err) {
+            logDetectionFailure("refreshAll", err);
+            if (!this.lastDetection) {
+                await Promise.allSettled(
+                    automaticEntries.map(({ action, generation }) =>
+                        this.renderDetectionFailure(action, generation, false),
+                    ),
+                );
             }
+            return;
         }
 
-        for (const { action, settings } of entries) {
-            try {
-                await this.refresh(action, settings, result);
-            } catch (err) {
-                log.warn("Action", `refreshAll: failed for ${action.id}`, err);
+        await Promise.allSettled(
+            automaticEntries.map(({ action, settings, generation }) =>
+                this.renderResult(action, settings, result, generation),
+            ),
+        );
+    }
+
+    private async refresh(
+        key: KeyAction<AudioDeviceSettings>,
+        settings: AudioDeviceSettings | undefined,
+        showAlertOnFailure: boolean,
+    ): Promise<void> {
+        const generation = this.nextRenderGeneration(key.id);
+
+        if (hasCustomLabel(settings)) {
+            await this.renderCustomLabel(key, settings.customLabel, generation);
+            return;
+        }
+
+        if (this.lastDetection) {
+            await this.renderResult(key, settings, this.lastDetection, generation);
+        } else {
+            await this.safeSetTitle(key, "…", generation);
+        }
+
+        try {
+            const result = await this.requestDetection();
+            await this.renderResult(key, settings, result, generation);
+        } catch (err) {
+            logDetectionFailure("refresh", err);
+            if (!this.lastDetection) {
+                await this.renderDetectionFailure(key, generation, showAlertOnFailure);
+            } else if (showAlertOnFailure && this.isCurrentRender(key, generation)) {
+                await key.showAlert().catch(() => undefined);
             }
         }
     }
 
     /**
-     * Detect (or use a pre-fetched result), format, and push the title to
-     * the key. Pass `preDetected` from refreshAll() to share one detect
-     * across all visible keys.
+     * Shares one detection across callers. If an endpoint event invalidates an
+     * in-flight read, exactly one follow-up read runs before callers complete.
      */
-    private async refresh(
+    private async requestDetection(): Promise<DetectionResult> {
+        const targetInvalidation = this.invalidation;
+        if (
+            this.lastDetection &&
+            this.completedInvalidation >= targetInvalidation &&
+            Date.now() - this.lastDetectionAt <= MEMORY_CACHE_MS
+        ) {
+            return this.lastDetection;
+        }
+
+        if (this.detectionInFlight) {
+            await this.detectionInFlight;
+            if (this.completedInvalidation < targetInvalidation) {
+                return this.requestDetection();
+            }
+            if (!this.lastDetection) throw new Error("detection completed without a result");
+            return this.lastDetection;
+        }
+
+        const operationVersion = this.invalidation;
+        const operation = this.detector.detect().then((result) => {
+            this.lastDetection = result;
+            this.lastDetectionAt = Date.now();
+            this.completedInvalidation = operationVersion;
+            this.queuePersistedCache(result.name);
+            return result;
+        });
+        this.detectionInFlight = operation;
+
+        let result: DetectionResult;
+        try {
+            result = await operation;
+        } finally {
+            if (this.detectionInFlight === operation) this.detectionInFlight = null;
+        }
+
+        if (this.invalidation > operationVersion) return this.requestDetection();
+        return result;
+    }
+
+    private invalidateDetection(): void {
+        this.invalidation++;
+    }
+
+    private setDetectionActive(contextId: string, active: boolean): void {
+        const wasActive = this.activeDetectionContexts.has(contextId);
+        if (active === wasActive) return;
+
+        if (active) this.activeDetectionContexts.add(contextId);
+        else this.activeDetectionContexts.delete(contextId);
+        this.onActiveDetectionCountChanged?.(this.activeDetectionContexts.size);
+    }
+
+    private queuePersistedCache(name: string): void {
+        const now = Date.now();
+        if (
+            name === this.lastPersistedName &&
+            now - this.lastPersistedAt < PERSIST_MIN_INTERVAL_MS
+        ) {
+            return;
+        }
+
+        this.lastPersistedName = name;
+        this.lastPersistedAt = now;
+        const persistName = name;
+        const persistAt = now;
+        this.persistChain = this.persistChain
+            .catch(() => undefined)
+            .then(async () => {
+                if (!this.globalSettingsLoaded) {
+                    try {
+                        this.globalSettings =
+                            await streamDeck.settings.getGlobalSettings<GlobalAudioSettings>();
+                    } catch {
+                        this.globalSettings = {};
+                    }
+                    this.globalSettingsLoaded = true;
+                }
+
+                this.globalSettings = {
+                    ...this.globalSettings,
+                    lastDefaultOutputName: persistName,
+                    lastDefaultOutputUpdatedAt: persistAt,
+                };
+                await streamDeck.settings.setGlobalSettings(this.globalSettings);
+                this.lastPersistedName = persistName;
+                this.lastPersistedAt = persistAt;
+            })
+            .catch((err) => {
+                getLogger().warn("Action", "failed to persist cached device name", err);
+            });
+    }
+
+    private async renderCustomLabel(
+        key: KeyAction<AudioDeviceSettings>,
+        customLabel: string,
+        generation: number,
+    ): Promise<void> {
+        await this.safeSetTitle(key, wrapForKey(customLabel.trim()), generation);
+    }
+
+    private async renderResult(
         key: KeyAction<AudioDeviceSettings>,
         settings: AudioDeviceSettings | undefined,
-        preDetected?: PrefetchedDetection,
+        result: DetectionResult,
+        generation: number,
     ): Promise<void> {
-        const log = getLogger();
-
-        // Allow user override — fast path, no detect needed.
-        if (hasCustomLabel(settings)) {
-            const label = wrapForKey(settings.customLabel.trim());
-            log.debug("Action", `using custom label: "${label}"`);
-            try {
-                await key.setTitle(label);
-            } catch {
-                /* not fatal */
-            }
-            return;
-        }
-
-        // Only show the "…" placeholder when we're about to do real work
-        // (no preDetected). With preDetected we render immediately and the
-        // flicker would just be noise.
-        if (!preDetected) {
-            try {
-                await key.setTitle("…");
-            } catch {
-                /* not fatal */
-            }
-        }
-
-        if (preDetected === null) {
-            await this.renderDetectionFailure(key);
-            return;
-        }
-
-        let result = preDetected;
-        if (!result) {
-            try {
-                result = await this.detector.detect();
-            } catch (err) {
-                const causes =
-                    err instanceof DetectionError ? err.causes.join(" | ") : String(err);
-                log.error("Action", "detection failed", causes);
-                await this.renderDetectionFailure(key);
-                return;
-            }
-        }
-
+        if (!this.isCurrentRender(key, generation)) return;
         const shortened = shortenDeviceName(result.name, {
             maxLength: settings?.maxLength,
             aggressive: settings?.aggressiveShorten ?? true,
             style: settings?.nameStyle ?? "role",
         });
-        const wrapped = wrapForKey(shortened);
-
-        log.info(
-            "Action",
-            `device="${result.name}" → display="${shortened}" (via ${result.source})`,
-        );
 
         try {
-            await key.setTitle(wrapped);
+            await key.setTitle(wrapForKey(shortened));
+            if (!this.isCurrentRender(key, generation)) return;
             await key.setState(0);
         } catch (err) {
-            log.warn("Action", `setTitle failed for ${key.id}`, err);
+            getLogger().warn("Action", `render failed for ${key.id}`, err);
         }
     }
 
     private async renderDetectionFailure(
         key: KeyAction<AudioDeviceSettings>,
+        generation: number,
+        showAlert: boolean,
     ): Promise<void> {
+        if (!this.isCurrentRender(key, generation)) return;
         try {
             await key.setTitle("Unknown");
-            await key.showAlert();
+            if (showAlert && this.isCurrentRender(key, generation)) await key.showAlert();
         } catch {
-            /* ignore */
+            /* The action may have disappeared. */
         }
+    }
+
+    private async safeSetTitle(
+        key: KeyAction<AudioDeviceSettings>,
+        title: string,
+        generation: number,
+    ): Promise<void> {
+        if (!this.isCurrentRender(key, generation)) return;
+        try {
+            await key.setTitle(title);
+            if (this.isCurrentRender(key, generation)) await key.setState(0);
+        } catch {
+            /* The action may have disappeared. */
+        }
+    }
+
+    private nextRenderGeneration(contextId: string): number {
+        const next = (this.renderGenerations.get(contextId) ?? 0) + 1;
+        this.renderGenerations.set(contextId, next);
+        return next;
+    }
+
+    private isCurrentRender(
+        key: KeyAction<AudioDeviceSettings>,
+        generation: number,
+    ): boolean {
+        return (
+            this.visible.get(key.id) === key &&
+            this.renderGenerations.get(key.id) === generation
+        );
     }
 }
 
@@ -265,4 +454,10 @@ function hasCustomLabel(
     settings: AudioDeviceSettings | undefined,
 ): settings is AudioDeviceSettings & { customLabel: string } {
     return typeof settings?.customLabel === "string" && settings.customLabel.trim().length > 0;
+}
+
+function logDetectionFailure(scope: string, err: unknown): void {
+    const message =
+        err instanceof DetectionError ? err.causes.join(" | ") : err instanceof Error ? err.message : String(err);
+    getLogger().error("Action", `${scope}: detection failed`, message);
 }

@@ -1,17 +1,13 @@
 /**
  * AudioDefaultDeviceSetter - sets the default Windows input/output endpoint.
  *
- * Device lookup is intentionally name-first. Endpoint IDs can change after
- * driver updates or re-plugs, while friendly names tend to survive. A saved ID
- * may still be supplied as a fallback/tie-breaker for duplicate device names.
+ * Device lookup uses the saved endpoint ID first while it remains active, then
+ * exact friendly-name matching for replug/driver-update recovery.
  */
 
-import { spawn } from "node:child_process";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { POWERSHELL_SET_DEFAULT_SCRIPT } from "./set-default-script.js";
-import { getLogger } from "../utils/logger.js";
+import { POWERSHELL_EXE, runProcess } from "./process-runner.js";
+import { stagePowerShellScript } from "./script-stager.js";
 
 export type AudioEndpointFlow = "render" | "capture";
 
@@ -42,27 +38,16 @@ export class SetDefaultDeviceError extends Error {
 const DEFAULT_TIMEOUT_MS = 7000;
 
 export class AudioDefaultDeviceSetter {
-    private psScriptPath: string | null = null;
-
     async listDevices(
         flow: AudioEndpointFlow,
         timeoutMs: number = DEFAULT_TIMEOUT_MS,
     ): Promise<AudioEndpointDevice[]> {
-        const scriptPath = await this.ensureScriptOnDisk();
-        const stdout = await this.runProcess(
-            "powershell.exe",
-            [
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                scriptPath,
-                "-Mode",
-                "List",
-                "-Flow",
-                flow,
-            ],
+        const scriptPath = await stagePowerShellScript(
+            "set-default-audio.ps1",
+            POWERSHELL_SET_DEFAULT_SCRIPT,
+        );
+        const stdout = await this.runPowerShell(
+            ["-File", scriptPath, "-Mode", "List", "-Flow", flow],
             timeoutMs,
         );
 
@@ -80,14 +65,12 @@ export class AudioDefaultDeviceSetter {
             throw new SetDefaultDeviceError("Set a device name or fallback device ID first");
         }
 
-        const scriptPath = await this.ensureScriptOnDisk();
-        const stdout = await this.runProcess(
-            "powershell.exe",
+        const scriptPath = await stagePowerShellScript(
+            "set-default-audio.ps1",
+            POWERSHELL_SET_DEFAULT_SCRIPT,
+        );
+        const stdout = await this.runPowerShell(
             [
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
                 "-File",
                 scriptPath,
                 "-Mode",
@@ -103,30 +86,6 @@ export class AudioDefaultDeviceSetter {
         );
 
         return this.parsePsOutput(stdout);
-    }
-
-    /**
-     * Write the PowerShell script to %TEMP% once per process. The script is
-     * reused for both input and output setter actions.
-     */
-    private async ensureScriptOnDisk(): Promise<string> {
-        if (this.psScriptPath) {
-            try {
-                await fs.access(this.psScriptPath);
-                return this.psScriptPath;
-            } catch {
-                /* %TEMP% may have been cleaned; re-stage below. */
-            }
-        }
-
-        const dir = path.join(os.tmpdir(), "com.nathan.defaultaudio");
-        await fs.mkdir(dir, { recursive: true });
-        const file = path.join(dir, "set-default-audio.ps1");
-        await fs.writeFile(file, POWERSHELL_SET_DEFAULT_SCRIPT, { encoding: "utf8" });
-        this.psScriptPath = file;
-
-        getLogger().debug("AudioDefaultDeviceSetter", `PowerShell script staged at ${file}`);
-        return file;
     }
 
     private parsePsOutput(stdout: string): SetDefaultDeviceResult {
@@ -233,74 +192,26 @@ export class AudioDefaultDeviceSetter {
             .find((line) => line.startsWith("OK\t") || line.startsWith("ERR\t"));
     }
 
-    /**
-     * Spawn a process with a hard timeout. Returns stdout as UTF-8.
-     */
-    private runProcess(
-        command: string,
+    private async runPowerShell(
         args: readonly string[],
         timeoutMs: number,
     ): Promise<string> {
-        return new Promise<string>((resolve, reject) => {
-            const child = spawn(command, args, {
-                windowsHide: true,
-                stdio: ["ignore", "pipe", "pipe"],
-            });
-
-            let stdout = "";
-            let stderr = "";
-            let settled = false;
-
-            const settle = (fn: () => void) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                fn();
-            };
-
-            const timer = setTimeout(() => {
-                try {
-                    child.kill("SIGKILL");
-                } catch {
-                    /* ignore */
-                }
-                settle(() =>
-                    reject(
-                        new SetDefaultDeviceError(
-                            `${command} timed out after ${timeoutMs}ms`,
-                        ),
-                    ),
-                );
-            }, timeoutMs);
-
-            child.stdout.setEncoding("utf8");
-            child.stderr.setEncoding("utf8");
-            child.stdout.on("data", (d) => (stdout += d));
-            child.stderr.on("data", (d) => (stderr += d));
-
-            child.on("error", (err) => {
-                settle(() =>
-                    reject(
-                        new SetDefaultDeviceError(
-                            `${command} spawn failed: ${err.message}`,
-                        ),
-                    ),
-                );
-            });
-
-            child.on("close", (code) => {
-                if (code === 0) {
-                    settle(() => resolve(stdout));
-                } else {
-                    settle(() =>
-                        reject(
-                            new SetDefaultDeviceError(
-                                `${command} exited ${code}: ${stderr.trim() || "(no stderr)"}`,
-                            ),
-                        ),
-                    );
-                }
-            });
-        });
+        try {
+            return await runProcess(
+                POWERSHELL_EXE,
+                [
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    ...args,
+                ],
+                { timeoutMs },
+            );
+        } catch (err) {
+            throw new SetDefaultDeviceError(
+                err instanceof Error ? err.message : String(err),
+            );
+        }
     }
 }

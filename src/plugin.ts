@@ -1,64 +1,36 @@
-/**
- * plugin.ts — entry point.
- *
- * Stream Deck launches this file with Node 20. Keep this small: wire up
- * logging, register the action, start the audio watcher, connect.
- */
-
 import streamDeck, { LogLevel } from "@elgato/streamdeck";
 import * as path from "node:path";
 import * as url from "node:url";
 
-import { initLogger, LogLevel as MyLogLevel } from "./utils/logger.js";
 import { AudioDeviceAction } from "./actions/audio-device.js";
 import {
     SetDefaultInputDeviceAction,
     SetDefaultOutputDeviceAction,
 } from "./actions/set-default-device.js";
+import { AudioDetector } from "./audio/detector.js";
 import { AudioWatcher } from "./audio/watcher.js";
+import { initLogger, LogLevel as FileLogLevel } from "./utils/logger.js";
 
-// Resolve <plugin-dir>/logs relative to the bundled plugin.js, regardless of
-// where Stream Deck launched us from.
+const WATCHER_IDLE_STOP_MS = 30000;
+const debugLogging = process.env.DEFAULT_AUDIO_DEBUG === "1";
+
 const here = path.dirname(url.fileURLToPath(import.meta.url));
-const logDir = path.resolve(here, "..", "logs");
-
 const log = initLogger({
-    logDir,
-    minLevel: MyLogLevel.DEBUG,
+    logDir: path.resolve(here, "..", "logs"),
+    minLevel: debugLogging ? FileLogLevel.DEBUG : FileLogLevel.INFO,
 });
+streamDeck.logger.setLevel(debugLogging ? LogLevel.TRACE : LogLevel.INFO);
 
-// Mirror SDK logs at DEBUG too, so the bundled .com.elgato log gets the same fidelity.
-streamDeck.logger.setLevel(LogLevel.TRACE);
-
-// Top-level safety net: never let an unhandled rejection take the process down silently.
-process.on("uncaughtException", (err) => {
-    log.error("process", "uncaughtException", err);
-});
-process.on("unhandledRejection", (reason) => {
-    log.error("process", "unhandledRejection", reason as Error);
-});
-
-log.info("plugin", `boot · node=${process.version} · cwd=${process.cwd()}`);
-
-// Register the action and create the watcher.
-const audioAction = new AudioDeviceAction();
-const setDefaultOutputAction = new SetDefaultOutputDeviceAction();
-const setDefaultInputAction = new SetDefaultInputDeviceAction();
-streamDeck.actions.registerAction(audioAction);
-streamDeck.actions.registerAction(setDefaultOutputAction);
-streamDeck.actions.registerAction(setDefaultInputAction);
+let watcherIdleTimer: NodeJS.Timeout | null = null;
+let audioAction!: AudioDeviceAction;
+let shuttingDown = false;
 
 const watcher = new AudioWatcher((ev) => {
-    // We only refresh on render-side changes (flow=0). Capture-flow events
-    // would just spawn unnecessary detects.
     if (ev.type === "default-changed") {
-        if (ev.flow === undefined || ev.flow === 0) {
-            audioAction.scheduleRefreshAll();
-        }
+        if (ev.flow === undefined || ev.flow === 0) audioAction.scheduleRefreshAll();
         return;
     }
-    // Hot-plug and state changes can affect what Windows considers default
-    // (e.g. unplug headphones → speakers become default).
+
     if (
         ev.type === "device-added" ||
         ev.type === "device-removed" ||
@@ -68,28 +40,77 @@ const watcher = new AudioWatcher((ev) => {
     }
 });
 
-let shuttingDown = false;
-const shutdown = (sig: string) => {
+const detector = new AudioDetector((timeoutMs) =>
+    watcher.getDefaultRenderName(timeoutMs),
+);
+
+audioAction = new AudioDeviceAction({
+    detector,
+    onActiveDetectionCountChanged: (activeCount) => {
+        if (shuttingDown) return;
+        if (activeCount > 0) {
+            if (watcherIdleTimer) {
+                clearTimeout(watcherIdleTimer);
+                watcherIdleTimer = null;
+            }
+            void watcher.start().catch((err) => {
+                log.warn("plugin", "watcher unavailable; one-shot fallback remains active", err);
+            });
+            return;
+        }
+
+        if (watcherIdleTimer) clearTimeout(watcherIdleTimer);
+        watcherIdleTimer = setTimeout(() => {
+            watcherIdleTimer = null;
+            watcher.stop();
+        }, WATCHER_IDLE_STOP_MS);
+        watcherIdleTimer.unref();
+    },
+});
+
+streamDeck.actions.registerAction(audioAction);
+streamDeck.actions.registerAction(new SetDefaultOutputDeviceAction());
+streamDeck.actions.registerAction(new SetDefaultInputDeviceAction());
+
+function shutdown(reason: string, exitCode: number): void {
     if (shuttingDown) return;
     shuttingDown = true;
-    log.info("plugin", `received ${sig}, shutting down`);
-    try {
-        watcher.stop();
-    } catch (err) {
-        log.warn("plugin", "watcher.stop() threw", err as Error);
+    process.exitCode = exitCode;
+    log.info("plugin", `${reason}; shutting down with code ${exitCode}`);
+
+    if (watcherIdleTimer) {
+        clearTimeout(watcherIdleTimer);
+        watcherIdleTimer = null;
     }
-    // Give the watcher its grace window, then exit.
-    setTimeout(() => process.exit(0), 750).unref();
-};
+    watcher.stop();
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+    void log.flushAndWait(500);
+    setTimeout(() => process.exit(exitCode), 750);
+}
 
-streamDeck
-    .connect()
-    .then(() => {
-        log.info("plugin", "connected to Stream Deck");
-        return watcher.start();
-    })
-    .then(() => log.info("plugin", "watcher started"))
-    .catch((err) => log.error("plugin", "startup failed", err));
+process.once("uncaughtException", (err) => {
+    log.error("process", "uncaughtException", err);
+    shutdown("fatal uncaught exception", 1);
+});
+process.once("unhandledRejection", (reason) => {
+    log.error("process", "unhandledRejection", reason);
+    shutdown("fatal unhandled rejection", 1);
+});
+process.once("SIGTERM", () => shutdown("received SIGTERM", 0));
+process.once("SIGINT", () => shutdown("received SIGINT", 0));
+
+async function main(): Promise<void> {
+    log.info("plugin", `boot · node=${process.version} · cwd=${process.cwd()}`);
+    try {
+        await streamDeck.connect();
+    } catch (err) {
+        log.error("plugin", "failed to connect to Stream Deck", err);
+        shutdown("startup failed", 1);
+        return;
+    }
+
+    log.info("plugin", "connected to Stream Deck");
+    void audioAction.hydrateCachedDevice();
+}
+
+void main();

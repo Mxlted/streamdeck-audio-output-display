@@ -23,6 +23,7 @@ import {
     SetDefaultDeviceError,
     type AudioEndpointFlow,
     type AudioEndpointDevice,
+    type SetDefaultDeviceResult,
 } from "../audio/default-device-setter.js";
 import { wrapForKey } from "../utils/name-shortener.js";
 import { getLogger } from "../utils/logger.js";
@@ -30,7 +31,7 @@ import { getLogger } from "../utils/logger.js";
 export interface SetDefaultDeviceSettings extends JsonObject {
     /** Friendly device name chosen from the property inspector. */
     selectedDeviceName?: string;
-    /** Endpoint ID chosen from the property inspector; used as fallback/tie-breaker. */
+    /** Endpoint ID chosen from the property inspector; authoritative while active. */
     selectedDeviceId?: string;
     /** Older settings retained for migration from the previous text-field PI. */
     targetName?: string;
@@ -56,12 +57,17 @@ interface ListDevicesRequest extends JsonObject {
     type: "list-devices";
 }
 
+const DEVICE_LIST_CACHE_MS = 2000;
+
 abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDeviceSettings> {
     protected abstract readonly flow: AudioEndpointFlow;
     protected abstract readonly idleTitle: string;
     protected abstract readonly logScope: string;
 
     private readonly setter = new AudioDefaultDeviceSetter();
+    private readonly activeContexts = new Set<string>();
+    private deviceListCache: { devices: AudioEndpointDevice[]; updatedAt: number } | null = null;
+    private deviceListInFlight: Promise<AudioEndpointDevice[]> | null = null;
 
     override async onWillAppear(
         ev: WillAppearEvent<SetDefaultDeviceSettings>,
@@ -107,6 +113,11 @@ abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDevi
             `keyDown · context=${ev.action.id} · targetName="${targetName}"`,
         );
 
+        if (this.activeContexts.has(ev.action.id)) {
+            log.warn(this.logScope, `ignored duplicate keyDown for ${ev.action.id}`);
+            return;
+        }
+
         if (!targetName && !fallbackDeviceId) {
             try {
                 await ev.action.setTitle("Pick\nDevice");
@@ -117,42 +128,59 @@ abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDevi
             return;
         }
 
+        // Claim the context before the first await so rapid repeated key-down
+        // events cannot both cross the duplicate-operation guard.
+        this.activeContexts.add(ev.action.id);
         try {
-            await ev.action.setTitle("...");
-        } catch {
-            /* ignore */
-        }
+            try {
+                await ev.action.setTitle("...");
+            } catch {
+                /* ignore */
+            }
 
-        try {
-            const result = await this.setter.setDefault({
-                flow: this.flow,
-                targetName,
-                fallbackDeviceId,
-            });
+            let result: SetDefaultDeviceResult;
+            try {
+                result = await this.setter.setDefault({
+                    flow: this.flow,
+                    targetName,
+                    fallbackDeviceId,
+                });
+            } catch (err) {
+                const message =
+                    err instanceof SetDefaultDeviceError || err instanceof Error
+                        ? err.message
+                        : String(err);
+                log.error(this.logScope, `set default failed: ${message}`, err);
+                try {
+                    await ev.action.setTitle("Failed");
+                    await ev.action.showAlert();
+                } catch {
+                    /* The key may have disappeared. */
+                }
+                return;
+            }
 
             log.info(
                 this.logScope,
                 `set default succeeded · device="${result.name}" · matchedBy=${result.matchedBy}`,
             );
 
-            await ev.action.setSettings({
-                selectedDeviceName: result.name,
-                selectedDeviceId: result.deviceId,
-            });
-            await this.renderSuccess(ev.action, settings, result.name);
-            await ev.action.showOk();
-        } catch (err) {
-            const message =
-                err instanceof SetDefaultDeviceError || err instanceof Error
-                    ? err.message
-                    : String(err);
-            log.error(this.logScope, `set default failed: ${message}`, err);
+            // The system operation already succeeded. A settings persistence
+            // failure must not incorrectly present the switch itself as failed.
             try {
-                await ev.action.setTitle("Failed");
-                await ev.action.showAlert();
-            } catch {
-                /* ignore */
+                await ev.action.setSettings({
+                    selectedDeviceName: result.name,
+                    selectedDeviceId: result.deviceId,
+                });
+            } catch (err) {
+                log.warn(this.logScope, "device switched but settings persistence failed", err);
             }
+
+            await this.renderSuccess(ev.action, settings, result.name);
+            await ev.action.showOk().catch(() => undefined);
+            this.deviceListCache = null;
+        } finally {
+            this.activeContexts.delete(ev.action.id);
         }
     }
 
@@ -198,7 +226,7 @@ abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDevi
 
         let payload: DeviceListPayload | DeviceListErrorPayload;
         try {
-            const devices = await this.setter.listDevices(this.flow);
+            const devices = await this.getDeviceList();
             payload = {
                 type: "device-list",
                 devices: devices.map(toDeviceListItemPayload),
@@ -221,6 +249,31 @@ abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDevi
             await current.sendToPropertyInspector(payload);
         } catch (err) {
             log.warn(this.logScope, "sendToPropertyInspector failed", err);
+        }
+    }
+
+    private async getDeviceList(): Promise<AudioEndpointDevice[]> {
+        const now = Date.now();
+        if (
+            this.deviceListCache &&
+            now - this.deviceListCache.updatedAt <= DEVICE_LIST_CACHE_MS
+        ) {
+            return this.deviceListCache.devices;
+        }
+        if (this.deviceListInFlight) return this.deviceListInFlight;
+
+        const operation = this.setter.listDevices(this.flow).then((devices) => {
+            const sorted = [...devices].sort(
+                (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id),
+            );
+            this.deviceListCache = { devices: sorted, updatedAt: Date.now() };
+            return sorted;
+        });
+        this.deviceListInFlight = operation;
+        try {
+            return await operation;
+        } finally {
+            if (this.deviceListInFlight === operation) this.deviceListInFlight = null;
         }
     }
 }

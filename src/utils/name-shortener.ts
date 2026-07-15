@@ -198,6 +198,15 @@ export function wrapForKey(text: string, charsPerLine = 8): string {
     }
     if (current.length > 0) lines.push(current);
 
-    // Cap at 3 lines max (Stream Deck keys are tiny).
-    return lines.slice(0, 3).join("\n");
+    // Cap at 3 lines and make omitted content visible instead of silently
+    // dropping the remainder.
+    const visible = lines.slice(0, 3);
+    if (lines.length > 3) {
+        const last = visible[2];
+        visible[2] =
+            last.length >= charsPerLine
+                ? `${last.slice(0, Math.max(1, charsPerLine - 1))}…`
+                : `${last}…`;
+    }
+    return visible.join("\n");
 }

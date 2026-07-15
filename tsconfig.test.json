@@ -1,0 +1,16 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "rootDir": ".",
+        "outDir": ".test-dist",
+        "sourceMap": false,
+        "noEmit": false
+    },
+    "include": [
+        "src/audio/process-runner.ts",
+        "src/audio/watcher-script.ts",
+        "src/utils/name-shortener.ts",
+        "tests/**/*.ts"
+    ],
+    "exclude": ["node_modules", ".test-dist"]
+}

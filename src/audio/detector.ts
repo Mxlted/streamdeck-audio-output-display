@@ -2,28 +2,26 @@
  * AudioDetector - Detects the current default Windows audio output device.
  *
  * Detection strategy (in order):
- *   1. PowerShell + embedded C# Core Audio COM (most reliable, returns the
- *      same name shown in Windows Sound settings).
- *   2. Registry fallback - reads HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion
+ *   1. Persistent watcher/broker Core Audio query.
+ *   2. One-shot PowerShell + embedded C# Core Audio COM fallback.
+ *   3. Registry fallback - reads HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion
  *      \MMDevices\Audio\Render to identify the default render endpoint and
  *      pull its FriendlyName property. Useful if PowerShell execution policy
  *      blocks Add-Type.
  *
- * All external calls have hard timeouts and are non-blocking.
+ * The complete operation has one hard deadline and all child output is bounded.
  */
 
-import { spawn } from "node:child_process";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { POWERSHELL_DETECT_SCRIPT } from "./powershell-script.js";
+import { POWERSHELL_EXE, REG_EXE, runProcess } from "./process-runner.js";
+import { stagePowerShellScript } from "./script-stager.js";
 import { getLogger } from "../utils/logger.js";
 
 export interface DetectionResult {
     /** The raw device name as reported by Windows, e.g. "Speakers (Realtek(R) Audio)". */
     name: string;
     /** Which detection path produced the result. */
-    source: "powershell" | "registry";
+    source: "watcher" | "powershell" | "registry" | "cache";
 }
 
 export class DetectionError extends Error {
@@ -33,53 +31,59 @@ export class DetectionError extends Error {
     }
 }
 
-/** Default timeout for any single detection attempt. */
+/** Default deadline for the complete detection operation. */
 const DEFAULT_TIMEOUT_MS = 5000;
 
+export type DefaultDeviceNameResolver = (timeoutMs: number) => Promise<string>;
+
 export class AudioDetector {
-    private psScriptPath: string | null = null;
+    constructor(private readonly preferredResolver?: DefaultDeviceNameResolver) {}
 
     /**
      * Detect the current default audio output device.
-     * Tries PowerShell first; if that fails or times out, falls back to the registry.
-     * Will retry the PowerShell path once before falling back.
+     * Tries the persistent watcher first, then one-shot PowerShell, and finally
+     * the best-effort registry fallback. The timeout covers the whole operation.
      */
     async detect(timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<DetectionResult> {
         const log = getLogger();
         const causes: string[] = [];
+        const deadline = Date.now() + Math.max(1, timeoutMs);
 
-        // Attempt 1: PowerShell.
+        if (this.preferredResolver) {
+            try {
+                log.debug("AudioDetector", "attempt 1: persistent watcher");
+                const name = await this.preferredResolver(remainingMs(deadline));
+                if (!name.trim()) throw new Error("watcher returned an empty device name");
+                log.info("AudioDetector", `Watcher detection succeeded: "${name}"`);
+                return { name, source: "watcher" };
+            } catch (err) {
+                const msg = errorMessage(err);
+                log.warn("AudioDetector", `Watcher detection failed: ${msg}`);
+                causes.push(`watcher: ${msg}`);
+            }
+        }
+
+        // One-shot fallback. A second identical retry adds startup pressure and
+        // does not help permanent failures such as policy-blocked Add-Type.
         try {
-            log.debug("AudioDetector", "attempt 1: PowerShell Core Audio");
-            const name = await this.detectViaPowerShell(timeoutMs);
+            log.debug("AudioDetector", "attempt 2: one-shot PowerShell Core Audio");
+            const name = await this.detectViaPowerShell(deadline);
             log.info("AudioDetector", `PowerShell detection succeeded: "${name}"`);
             return { name, source: "powershell" };
         } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log.warn("AudioDetector", `PowerShell attempt 1 failed: ${msg}`);
-            causes.push(`powershell-1: ${msg}`);
+            const msg = errorMessage(err);
+            log.warn("AudioDetector", `PowerShell fallback failed: ${msg}`);
+            causes.push(`powershell: ${msg}`);
         }
 
-        // Attempt 2: PowerShell retry (transient COM hiccups happen).
+        // Final approximate fallback, bounded by the same overall deadline.
         try {
-            log.debug("AudioDetector", "attempt 2: PowerShell retry");
-            const name = await this.detectViaPowerShell(timeoutMs);
-            log.info("AudioDetector", `PowerShell retry succeeded: "${name}"`);
-            return { name, source: "powershell" };
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log.warn("AudioDetector", `PowerShell attempt 2 failed: ${msg}`);
-            causes.push(`powershell-2: ${msg}`);
-        }
-
-        // Attempt 3: Registry fallback.
-        try {
-            log.debug("AudioDetector", "attempt 3: registry fallback");
-            const name = await this.detectViaRegistry(timeoutMs);
+            log.debug("AudioDetector", "attempt 3: bounded registry fallback");
+            const name = await this.detectViaRegistry(deadline);
             log.info("AudioDetector", `Registry detection succeeded: "${name}"`);
             return { name, source: "registry" };
         } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
+            const msg = errorMessage(err);
             log.error("AudioDetector", `Registry attempt failed: ${msg}`);
             causes.push(`registry: ${msg}`);
         }
@@ -89,11 +93,14 @@ export class AudioDetector {
 
     // ---------- PowerShell path ----------
 
-    private async detectViaPowerShell(timeoutMs: number): Promise<string> {
-        const scriptPath = await this.ensureScriptOnDisk();
+    private async detectViaPowerShell(deadline: number): Promise<string> {
+        const scriptPath = await stagePowerShellScript(
+            "detect-default-audio.ps1",
+            POWERSHELL_DETECT_SCRIPT,
+        );
 
-        const stdout = await this.runProcess(
-            "powershell.exe",
+        const stdout = await runProcess(
+            POWERSHELL_EXE,
             [
                 "-NoProfile",
                 "-NonInteractive",
@@ -102,35 +109,10 @@ export class AudioDetector {
                 "-File",
                 scriptPath,
             ],
-            timeoutMs,
+            { timeoutMs: remainingMs(deadline) },
         );
 
         return this.parsePsOutput(stdout);
-    }
-
-    /**
-     * Write the PowerShell script to %TEMP% once per process. Reading from a
-     * file (vs -Command "...") avoids quoting headaches and keeps the C#
-     * Add-Type cache hot across calls.
-     */
-    private async ensureScriptOnDisk(): Promise<string> {
-        if (this.psScriptPath) {
-            try {
-                await fs.access(this.psScriptPath);
-                return this.psScriptPath;
-            } catch {
-                /* %TEMP% may have been cleaned; re-stage below. */
-            }
-        }
-
-        const dir = path.join(os.tmpdir(), "com.nathan.defaultaudio");
-        await fs.mkdir(dir, { recursive: true });
-        const file = path.join(dir, "detect-default-audio.ps1");
-        await fs.writeFile(file, POWERSHELL_DETECT_SCRIPT, { encoding: "utf8" });
-        this.psScriptPath = file;
-
-        getLogger().debug("AudioDetector", `PowerShell script staged at ${file}`);
-        return file;
     }
 
     private parsePsOutput(stdout: string): string {
@@ -176,12 +158,16 @@ export class AudioDetector {
      *     as default. As a pragmatic fallback we try the registry "Default"
      *     marker first, and if absent return any active device.
      */
-    private async detectViaRegistry(timeoutMs: number): Promise<string> {
+    private async detectViaRegistry(deadline: number): Promise<string> {
         const renderRoot =
             "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render";
 
         // Step 1: enumerate Render sub-keys.
-        const enumOut = await this.runProcess("reg.exe", ["query", renderRoot], timeoutMs);
+        const enumOut = await runProcess(
+            REG_EXE,
+            ["query", renderRoot],
+            { timeoutMs: remainingMs(deadline) },
+        );
         const subkeys = enumOut
             .split(/\r?\n/)
             .map((l) => l.trim())
@@ -196,31 +182,32 @@ export class AudioDetector {
         const candidates: Array<{ name: string; state: number; level: number }> = [];
 
         for (const sub of subkeys) {
+            if (Date.now() >= deadline) break;
             const propsKey = `${renderRoot}\\${sub}\\Properties`;
             const friendlyValue =
                 "{a45c254e-df1c-4efd-8020-67d146a850e0},14"; // PKEY_Device_FriendlyName
 
             try {
-                const fnOut = await this.runProcess(
-                    "reg.exe",
+                const fnOut = await runProcess(
+                    REG_EXE,
                     ["query", propsKey, "/v", friendlyValue],
-                    timeoutMs,
+                    { timeoutMs: remainingMs(deadline) },
                 );
                 const name = this.parseRegStringValue(fnOut);
 
-                const stateOut = await this.runProcess(
-                    "reg.exe",
+                const stateOut = await runProcess(
+                    REG_EXE,
                     ["query", `${renderRoot}\\${sub}`, "/v", "DeviceState"],
-                    timeoutMs,
+                    { timeoutMs: remainingMs(deadline) },
                 );
                 const state = this.parseRegDwordValue(stateOut);
 
                 let level = 0;
                 try {
-                    const lvlOut = await this.runProcess(
-                        "reg.exe",
+                    const lvlOut = await runProcess(
+                        REG_EXE,
                         ["query", `${renderRoot}\\${sub}`, "/v", "Level"],
-                        timeoutMs,
+                        { timeoutMs: remainingMs(deadline) },
                     );
                     level = this.parseRegDwordValue(lvlOut);
                 } catch {
@@ -239,10 +226,12 @@ export class AudioDetector {
         }
 
         if (candidates.length === 0) {
+            remainingMs(deadline);
             throw new Error("no active render devices in registry");
         }
 
         // Highest "Level" wins as a heuristic for "most recently default".
+        remainingMs(deadline);
         candidates.sort((a, b) => b.level - a.level);
         return candidates[0].name;
     }
@@ -264,67 +253,14 @@ export class AudioDetector {
         throw new Error("no REG_DWORD value in reg output");
     }
 
-    // ---------- shared process runner ----------
+}
 
-    /**
-     * Spawn a process with a hard timeout. Returns stdout as UTF-8.
-     * Never throws synchronously; rejects on timeout or non-zero exit.
-     */
-    private runProcess(
-        command: string,
-        args: readonly string[],
-        timeoutMs: number,
-    ): Promise<string> {
-        return new Promise<string>((resolve, reject) => {
-            const child = spawn(command, args, {
-                windowsHide: true,
-                stdio: ["ignore", "pipe", "pipe"],
-            });
+function remainingMs(deadline: number): number {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("detection deadline exceeded");
+    return remaining;
+}
 
-            let stdout = "";
-            let stderr = "";
-            let settled = false;
-
-            const settle = (fn: () => void) => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                fn();
-            };
-
-            const timer = setTimeout(() => {
-                try {
-                    child.kill("SIGKILL");
-                } catch {
-                    /* ignore */
-                }
-                settle(() =>
-                    reject(new Error(`${command} timed out after ${timeoutMs}ms`)),
-                );
-            }, timeoutMs);
-
-            child.stdout.setEncoding("utf8");
-            child.stderr.setEncoding("utf8");
-            child.stdout.on("data", (d) => (stdout += d));
-            child.stderr.on("data", (d) => (stderr += d));
-
-            child.on("error", (err) => {
-                settle(() => reject(new Error(`${command} spawn failed: ${err.message}`)));
-            });
-
-            child.on("close", (code) => {
-                if (code === 0) {
-                    settle(() => resolve(stdout));
-                } else {
-                    settle(() =>
-                        reject(
-                            new Error(
-                                `${command} exited ${code}: ${stderr.trim() || "(no stderr)"}`,
-                            ),
-                        ),
-                    );
-                }
-            });
-        });
-    }
+function errorMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
 }

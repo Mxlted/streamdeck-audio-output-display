@@ -3,4 +3,5 @@ com.nathan.defaultaudio.sdPlugin/bin/
 com.nathan.defaultaudio.sdPlugin/logs/
 *.streamDeckPlugin
 *.tsbuildinfo
+.test-dist/
 .DS_Store

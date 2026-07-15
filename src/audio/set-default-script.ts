@@ -214,36 +214,40 @@ namespace DefaultAudioSetterPlugin {
                 }
             }
 
+            // Endpoint ID is authoritative while it is still active. Friendly
+            // name is recovery metadata for replug/driver-update ID changes.
+            if (fallback != null) {
+                fallback.MatchedBy = "endpoint-id";
+                return fallback;
+            }
+
             Endpoint best = null;
             int bestScore = 0;
+            int bestCount = 0;
             if (!String.IsNullOrWhiteSpace(targetName)) {
                 foreach (Endpoint endpoint in endpoints) {
                     int score = MatchScore(endpoint.Name, targetName);
                     if (score <= 0) continue;
 
-                    bool idTieBreak =
-                        score == bestScore &&
-                        fallback != null &&
-                        String.Equals(endpoint.Id, fallback.Id, StringComparison.OrdinalIgnoreCase);
-
-                    if (score > bestScore || idTieBreak) {
+                    if (score > bestScore) {
                         best = endpoint;
                         bestScore = score;
+                        bestCount = 1;
+                    } else if (score == bestScore) {
+                        bestCount++;
                     }
                 }
             }
 
             if (best != null) {
-                best.MatchedBy = MatchLabel(bestScore);
-                if (fallback != null && String.Equals(best.Id, fallback.Id, StringComparison.OrdinalIgnoreCase)) {
-                    best.MatchedBy += "+fallback-id";
+                if (bestCount > 1) {
+                    throw new Exception(
+                        "More than one active endpoint matches \"" + targetName +
+                        "\". Open the property inspector and select the device again."
+                    );
                 }
+                best.MatchedBy = MatchLabel(bestScore);
                 return best;
-            }
-
-            if (fallback != null) {
-                fallback.MatchedBy = "fallback-id";
-                return fallback;
             }
 
             string needle = String.IsNullOrWhiteSpace(targetName) ? fallbackId : targetName;
@@ -257,19 +261,12 @@ namespace DefaultAudioSetterPlugin {
             string normalizedTarget = NormalizeName(target);
             if (String.IsNullOrWhiteSpace(normalizedCandidate) || String.IsNullOrWhiteSpace(normalizedTarget)) return 0;
             if (String.Equals(normalizedCandidate, normalizedTarget, StringComparison.OrdinalIgnoreCase)) return 90;
-
-            if (candidate.IndexOf(target, StringComparison.OrdinalIgnoreCase) >= 0) return 75;
-            if (target.IndexOf(candidate, StringComparison.OrdinalIgnoreCase) >= 0) return 70;
-            if (normalizedCandidate.IndexOf(normalizedTarget, StringComparison.OrdinalIgnoreCase) >= 0) return 65;
-            if (normalizedTarget.IndexOf(normalizedCandidate, StringComparison.OrdinalIgnoreCase) >= 0) return 60;
             return 0;
         }
 
         static string MatchLabel(int score) {
             if (score >= 100) return "exact-name";
-            if (score >= 90) return "normalized-name";
-            if (score >= 70) return "contains-name";
-            return "normalized-contains";
+            return "normalized-name";
         }
 
         static string NormalizeName(string value) {

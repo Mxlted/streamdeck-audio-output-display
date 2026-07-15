@@ -30,6 +30,7 @@ const config = {
         },
         typescript({
             mapRoot: isWatching ? "./" : undefined,
+            sourceMap: isWatching,
         }),
         nodeResolve({
             browser: false,
