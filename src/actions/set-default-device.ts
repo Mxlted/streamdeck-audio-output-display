@@ -9,14 +9,15 @@ import {
     default as streamDeck,
     action,
     SingletonAction,
+    type Action,
     type DidReceiveSettingsEvent,
-    type JsonObject,
-    type JsonValue,
     type KeyAction,
     type KeyDownEvent,
+    type PropertyInspectorDidAppearEvent,
     type SendToPluginEvent,
     type WillAppearEvent,
 } from "@elgato/streamdeck";
+import type { JsonObject, JsonValue } from "@elgato/utils";
 
 import {
     AudioDefaultDeviceSetter,
@@ -89,15 +90,17 @@ abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDevi
         await this.renderIdle(ev.action, ev.payload.settings);
     }
 
-    override async onPropertyInspectorDidAppear(): Promise<void> {
-        await this.sendDeviceListToCurrentInspector();
+    override async onPropertyInspectorDidAppear(
+        ev: PropertyInspectorDidAppearEvent<SetDefaultDeviceSettings>,
+    ): Promise<void> {
+        await this.sendDeviceListToInspector(ev.action);
     }
 
     override async onSendToPlugin(
         ev: SendToPluginEvent<JsonValue, SetDefaultDeviceSettings>,
     ): Promise<void> {
         if (!isListDevicesRequest(ev.payload)) return;
-        await this.sendDeviceListToCurrentInspector();
+        await this.sendDeviceListToInspector(ev.action);
     }
 
     override async onKeyDown(
@@ -219,10 +222,18 @@ abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDevi
         return fallbackTitle;
     }
 
-    private async sendDeviceListToCurrentInspector(): Promise<void> {
+    private async sendDeviceListToInspector(
+        actionInstance: Action<SetDefaultDeviceSettings>,
+    ): Promise<void> {
         const log = getLogger();
-        const current = streamDeck.ui.current;
-        if (!current || current.action.manifestId !== this.manifestId) return;
+        const inspectorAction = streamDeck.ui.action;
+        if (
+            !inspectorAction ||
+            inspectorAction.id !== actionInstance.id ||
+            actionInstance.manifestId !== this.manifestId
+        ) {
+            return;
+        }
 
         let payload: DeviceListPayload | DeviceListErrorPayload;
         try {
@@ -243,10 +254,10 @@ abstract class SetDefaultDeviceActionBase extends SingletonAction<SetDefaultDevi
             };
         }
 
-        if (streamDeck.ui.current !== current) return;
+        if (streamDeck.ui.action?.id !== actionInstance.id) return;
 
         try {
-            await current.sendToPropertyInspector(payload);
+            await streamDeck.ui.sendToPropertyInspector(payload);
         } catch (err) {
             log.warn(this.logScope, "sendToPropertyInspector failed", err);
         }

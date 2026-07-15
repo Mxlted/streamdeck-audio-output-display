@@ -1,4 +1,4 @@
-import streamDeck, { LogLevel } from "@elgato/streamdeck";
+import streamDeck from "@elgato/streamdeck";
 import * as path from "node:path";
 import * as url from "node:url";
 
@@ -19,7 +19,8 @@ const log = initLogger({
     logDir: path.resolve(here, "..", "logs"),
     minLevel: debugLogging ? FileLogLevel.DEBUG : FileLogLevel.INFO,
 });
-streamDeck.logger.setLevel(debugLogging ? LogLevel.TRACE : LogLevel.INFO);
+streamDeck.logger.setLevel(debugLogging ? "trace" : "info");
+streamDeck.settings.useExperimentalMessageIdentifiers = true;
 
 let watcherIdleTimer: NodeJS.Timeout | null = null;
 let audioAction!: AudioDeviceAction;

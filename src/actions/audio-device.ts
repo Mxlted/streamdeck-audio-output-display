@@ -2,12 +2,12 @@ import streamDeck, {
     action,
     SingletonAction,
     type DidReceiveSettingsEvent,
-    type JsonObject,
     type KeyAction,
     type KeyDownEvent,
     type WillAppearEvent,
     type WillDisappearEvent,
 } from "@elgato/streamdeck";
+import type { JsonObject } from "@elgato/utils";
 
 import { AudioDetector, DetectionError, type DetectionResult } from "../audio/detector.js";
 import { shortenDeviceName, wrapForKey } from "../utils/name-shortener.js";

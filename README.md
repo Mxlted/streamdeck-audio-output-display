@@ -42,22 +42,22 @@ The displayed name stays in sync without polling: a long-running PowerShell + C#
 
 ### Tech stack
 
-- Elgato Stream Deck SDK v2 (`@elgato/streamdeck`).
+- Elgato Stream Deck manifest SDK v2 with the official `@elgato/streamdeck` 2.x Node SDK.
 - TypeScript, bundled with Rollup to a single ES module.
-- Node.js runtime (Stream Deck-bundled Node 20).
+- Node.js runtime (Stream Deck-bundled Node 24).
 - PowerShell with embedded C# (`Add-Type`) calling the Windows Core Audio COM API for the persistent watcher/broker and one-shot fallback operations.
 - Windows Registry fallback via `reg.exe`.
 
-There is no C++ or native addon. The plugin runs on whatever Node 20 build Stream Deck ships, with no `node-gyp` or `binding.gyp` step. All Windows API access happens through PowerShell child processes, so there is no native ABI risk when Stream Deck swaps Node versions.
+There is no C++ or native addon. The plugin runs on Stream Deck's bundled Node 24 runtime, with no `node-gyp` or `binding.gyp` step. All Windows API access happens through PowerShell child processes, so there is no native ABI risk when Stream Deck updates its Node runtime.
 
 ### Platform support
 
 - Windows only. Minimum Windows 10 (per `manifest.json`).
-- Stream Deck software 6.5 or newer (per `manifest.json`).
+- Stream Deck software 7.1 or newer (per `manifest.json`).
 
 ### Requirements
 
-- Stream Deck application 6.5+.
+- Stream Deck application 7.1+.
 - Windows 10 or newer.
 
 ## Installation
@@ -82,9 +82,9 @@ This section is for contributors and developers who want to build the plugin loc
 
 ### Prerequisites
 
-- Node.js 20.x (the plugin runs on Stream Deck's bundled Node 20 runtime; the build also works with Node 20+).
+- Node.js 24 or newer. The repository's `.nvmrc` selects Node 24.
 - npm (ships with Node).
-- Stream Deck application 6.5+ installed for local testing.
+- Stream Deck application 7.1+ installed for local testing.
 - Elgato Stream Deck CLI for packaging and linking, available via `npx @elgato/cli` or installed globally.
 
 There is no native build toolchain required. The repo has no `binding.gyp`, no CMake configuration, and no C++ sources to compile. Visual Studio Build Tools and Python are not needed.
@@ -162,6 +162,7 @@ npm run restart
 ## Project layout
 
 ```
+.nvmrc                         Node 24 development baseline.
 src/
   plugin.ts                  Entry point: logger init, action registration, watcher start, SDK connect, shutdown handlers.
   actions/audio-device.ts    The Stream Deck action class (key lifecycle, refresh logic, debounced refreshAll).
@@ -187,7 +188,7 @@ com.nathan.defaultaudio.sdPlugin/
   ui/set-default-device.js   Setter device-list and settings behavior.
   imgs/                      Plugin and action icons.
 tests/                       Unit and Windows watcher integration tests.
-.github/workflows/ci.yml     Windows Node 20 CI.
+.github/workflows/ci.yml     Windows Node 24 CI.
 ```
 
 ## Architecture
@@ -196,7 +197,7 @@ tests/                       Unit and Windows watcher integration tests.
 Stream Deck app
    |   (WebSocket, @elgato/streamdeck SDK)
    v
-plugin.js (Node 20, Stream Deck-bundled)
+plugin.js (Node 24, Stream Deck-bundled)
    |
    +-- AudioDeviceAction      handles key events, calls refresh / scheduleRefreshAll
    |

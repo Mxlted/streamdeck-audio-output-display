@@ -3,12 +3,13 @@
     "Name": "Default Audio Device",
     "Description": "Displays and sets default Windows audio devices from Stream Deck keys.",
     "Author": "Nathan",
-    "Version": "1.3.0.0",
+    "Version": "1.3.1.0",
     "Icon": "imgs/plugin/marketplace",
     "URL": "https://github.com/Mxlted/streamdeck-audio-output-display",
+    "SupportURL": "https://github.com/Mxlted/streamdeck-audio-output-display/issues",
     "SDKVersion": 2,
     "Software": {
-        "MinimumVersion": "6.5"
+        "MinimumVersion": "7.1"
     },
     "OS": [
         {
@@ -17,7 +18,7 @@
         }
     ],
     "Nodejs": {
-        "Version": "20"
+        "Version": "24"
     },
     "CodePath": "bin/plugin.js",
     "UUID": "com.nathan.defaultaudio",
@@ -45,6 +46,7 @@
                 }
             ],
             "DisableAutomaticStates": true,
+            "SupportedInKeyLogicActions": false,
             "SupportedInMultiActions": false
         },
         {
@@ -68,6 +70,7 @@
                 }
             ],
             "DisableAutomaticStates": true,
+            "SupportedInKeyLogicActions": true,
             "SupportedInMultiActions": true
         },
         {
@@ -91,6 +94,7 @@
                 }
             ],
             "DisableAutomaticStates": true,
+            "SupportedInKeyLogicActions": true,
             "SupportedInMultiActions": true
         }
     ]

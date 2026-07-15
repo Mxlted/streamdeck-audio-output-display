@@ -1,8 +1,8 @@
 {
-    "extends": "@tsconfig/node20/tsconfig.json",
+    "extends": "@tsconfig/node24/tsconfig.json",
     "compilerOptions": {
-        "lib": ["ES2022"],
-        "target": "ES2022",
+        "lib": ["ES2024"],
+        "target": "ES2024",
         "module": "ES2022",
         "moduleResolution": "Bundler",
         "esModuleInterop": true,
